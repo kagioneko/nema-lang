@@ -6,6 +6,7 @@ from lexer import Lexer
 from parser import Parser
 from evaluator import Evaluator
 from typechecker import typecheck, report
+from compiler import compile_program
 
 DECAY_INTERVAL = 5.0  # 5秒ごとにtick
 
@@ -39,12 +40,28 @@ def decay_loop(ev: Evaluator, stop: threading.Event):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: nema.py <file.nema>")
+        print("usage: nema.py <file.nema> [--compile]")
         sys.exit(1)
 
+    compile_mode = "--compile" in sys.argv
     path = sys.argv[1]
     with open(path) as f:
         src = f.read()
+
+    # コンパイルモード
+    if compile_mode:
+        tokens = Lexer(src).tokenize()
+        from parser import Parser as NemaParser
+        program = NemaParser(tokens).parse()
+        has_errors = report(typecheck(program))
+        if has_errors:
+            sys.exit(1)
+        ir_code = compile_program(program)
+        out_path = path.replace(".nema", ".ll")
+        with open(out_path, "w") as f:
+            f.write(ir_code)
+        print(f"✅ LLVM IR生成: {out_path}")
+        sys.exit(0)
 
     ev = run(src)
 
