@@ -32,6 +32,8 @@ Repository = "https://github.com/kagioneko/nema-lang"
 "Bug Tracker" = "https://github.com/kagioneko/nema-lang/issues"
 
 [tool.setuptools]
+include-package-data = true
+
 py-modules = [
     "lexer",
     "ast_nodes",
@@ -42,4 +44,5 @@ py-modules = [
     "compiler",
     "jit_run",
     "nema",
+    "shiichan",
 ]

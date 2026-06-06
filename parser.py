@@ -44,17 +44,25 @@ class Parser:
 
         mood = None
         fns = []
+        whens = []
+        attractors = []
 
         while self.peek().type != TT.RBRACE:
-            if self.peek().type == TT.MOOD:
+            t = self.peek()
+            if t.type == TT.MOOD:
                 mood = self.parse_mood()
-            elif self.peek().type in (TT.FN, TT.REQUIRES, TT.AFTER, TT.ON_ERROR, TT.WHEN):
+            elif t.type in (TT.FN, TT.REQUIRES, TT.AFTER, TT.ON_ERROR):
                 fns.append(self.parse_fn())
+            elif t.type == TT.WHEN:
+                whens.append(self.parse_when_block())
+            elif t.type == TT.IDENT and t.value == "attractor":
+                attractors.append(self.parse_attractor())
             else:
-                self.advance()  # 未知トークンはスキップ
+                self.advance()
 
         self.expect(TT.RBRACE)
-        return AgentDecl(name=name, mood=mood, fns=fns)
+        return AgentDecl(name=name, mood=mood, fns=fns,
+                         whens=whens, attractors=attractors)
 
     def parse_mood(self) -> MoodDecl:
         self.expect(TT.MOOD)
@@ -79,21 +87,19 @@ class Parser:
     def parse_fn(self) -> FnDecl:
         requires = None
 
-        # @requires デコレータ
         if self.peek().type == TT.REQUIRES:
             self.advance()
             self.expect(TT.LPAREN)
             requires = self.parse_condition()
             self.expect(TT.RPAREN)
 
-        # デコレータ系は今はスキップ
-        while self.peek().type in (TT.AFTER, TT.ON_ERROR, TT.WHEN):
+        while self.peek().type in (TT.AFTER, TT.ON_ERROR):
             self.advance()
             if self.peek().type == TT.LPAREN:
-                self.expect(TT.LPAREN)
+                self.advance()
                 while self.peek().type != TT.RPAREN:
                     self.advance()
-                self.expect(TT.RPAREN)
+                self.advance()
 
         self.expect(TT.FN)
         name = self.expect(TT.IDENT).value
@@ -109,22 +115,192 @@ class Parser:
             self.skip(TT.COMMA)
         self.expect(TT.RPAREN)
 
-        # 戻り値型
         ret_type = None
         if self.peek().type == TT.ARROW:
             self.advance()
             ret_type = self.parse_type()
-        elif self.peek().type == TT.IDENT and self.peek().value in ("String", "Answer", "Float", "Int"):
-            self.advance()
 
         self.expect(TT.LBRACE)
-        body = []
-        while self.peek().type != TT.RBRACE:
-            body.append(self.advance().value)
+        body = self.parse_body()
         self.expect(TT.RBRACE)
 
         return FnDecl(name=name, params=params, ret_type=ret_type,
                       requires=requires, body=body)
+
+    def parse_when_block(self) -> WhenBlock:
+        self.expect(TT.WHEN)
+        self.expect(TT.LPAREN)
+        cond = self.parse_condition()
+        self.expect(TT.RPAREN)
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return WhenBlock(condition=cond, body=body)
+
+    def parse_attractor(self) -> AttractorDecl:
+        self.advance()  # consume 'attractor' ident
+        name = self.expect(TT.IDENT).value
+        values = {}
+        if self.peek().type == TT.LBRACE:
+            self.expect(TT.LBRACE)
+            while self.peek().type != TT.RBRACE:
+                key = self.expect(TT.IDENT).value
+                self.expect(TT.COLON)
+                val = float(self.advance().value)
+                values[key] = val
+                self.skip(TT.COMMA)
+            self.expect(TT.RBRACE)
+        return AttractorDecl(name=name, values=values)
+
+    # ===== 文パーサー =====
+
+    def parse_body(self) -> list:
+        stmts = []
+        while self.peek().type not in (TT.RBRACE, TT.EOF):
+            s = self.parse_stmt()
+            if s is not None:
+                stmts.append(s)
+        return stmts
+
+    def parse_stmt(self):
+        t = self.peek()
+
+        if t.type == TT.LET:
+            return self.parse_let()
+
+        if t.type == TT.RETURN:
+            return self.parse_return()
+
+        if t.type == TT.BRANCH:
+            return self.parse_branch()
+
+        if t.type == TT.LOOP:
+            return self.parse_loop()
+
+        if t.type == TT.WHILE:
+            return self.parse_while()
+
+        if t.type == TT.UNTIL:
+            return self.parse_until()
+
+        # IDENT ~> IDENT msg — メッセージ送信文
+        if t.type == TT.IDENT and self.pos + 1 < len(self.tokens):
+            next_t = self.tokens[self.pos + 1]
+            if next_t.type == TT.ATTRACT:  # ~~
+                return self.parse_msg_send()
+
+        # IDENT( ... ) — 関数呼び出し文
+        if t.type == TT.IDENT:
+            expr = self.parse_expr()
+            return ExprStmt(expr=expr)
+
+        # その他は読み捨て
+        self.advance()
+        return None
+
+    def parse_let(self) -> LetStmt:
+        self.expect(TT.LET)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.ASSIGN)
+        value = self.parse_expr()
+        return LetStmt(name=name, value=value)
+
+    def parse_return(self) -> ReturnStmt:
+        self.expect(TT.RETURN)
+        if self.peek().type in (TT.RBRACE, TT.EOF):
+            return ReturnStmt(value=None)
+        return ReturnStmt(value=self.parse_expr())
+
+    def parse_branch(self) -> BranchStmt:
+        self.expect(TT.BRANCH)
+        cond = self.parse_condition()
+        self.expect(TT.LBRACE)
+        then_body = self.parse_body()
+        self.expect(TT.RBRACE)
+        else_body = []
+        if self.peek().type == TT.IDENT and self.peek().value == "else":
+            self.advance()
+            self.expect(TT.LBRACE)
+            else_body = self.parse_body()
+            self.expect(TT.RBRACE)
+        return BranchStmt(condition=cond, then_body=then_body, else_body=else_body)
+
+    def parse_loop(self) -> LoopStmt:
+        self.expect(TT.LOOP)
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return LoopStmt(body=body, condition=None)
+
+    def parse_while(self) -> LoopStmt:
+        self.expect(TT.WHILE)
+        cond = self.parse_condition()
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return LoopStmt(body=body, condition=cond, until=False)
+
+    def parse_until(self) -> LoopStmt:
+        self.expect(TT.UNTIL)
+        cond = self.parse_condition()
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return LoopStmt(body=body, condition=cond, until=True)
+
+    def parse_msg_send(self) -> ExprStmt:
+        receiver = self.advance().value  # IDENT
+        self.advance()                   # ~~ or ~>
+        msg = self.parse_expr()
+        return ExprStmt(expr=MsgSend(receiver=receiver, message=msg))
+
+    # ===== 式パーサー =====
+
+    def parse_expr(self) -> object:
+        return self.parse_binop()
+
+    def parse_binop(self) -> object:
+        left = self.parse_primary()
+        while self.peek().type in (TT.PLUS, TT.MINUS, TT.GT, TT.LT, TT.GE, TT.LE, TT.EQ):
+            op = self.advance().value
+            right = self.parse_primary()
+            left = BinOp(left=left, op=op, right=right)
+        return left
+
+    def parse_primary(self) -> object:
+        t = self.peek()
+
+        if t.type in (TT.INT, TT.FLOAT):
+            self.advance()
+            val = int(t.value) if t.type == TT.INT else float(t.value)
+            return Literal(value=val)
+
+        if t.type == TT.STRING:
+            self.advance()
+            return Literal(value=t.value)
+
+        if t.type == TT.IDENT:
+            name = self.advance().value
+            if self.peek().type == TT.LPAREN:
+                self.advance()
+                args = []
+                while self.peek().type != TT.RPAREN:
+                    args.append(self.parse_expr())
+                    self.skip(TT.COMMA)
+                self.expect(TT.RPAREN)
+                return FnCallExpr(name=name, args=args)
+            return VarRef(name=name)
+
+        if t.type == TT.LPAREN:
+            self.advance()
+            expr = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return expr
+
+        self.advance()
+        return Literal(value=None)
+
+    # ===== 型・条件パーサー =====
 
     def parse_type(self):
         t = self.peek()
@@ -146,19 +322,17 @@ class Parser:
             return TypePtr(inner=inner)
         if t.type == TT.NEUROSTATE:
             self.advance(); return TypeNeuroState()
-        # 未知型はIDENTとしてスキップ
         self.advance()
         return None
 
-    def parse_condition(self) -> list[tuple]:
-        # "dp > 0.6 and ac > 0.5" などをパース
+    def parse_condition(self) -> list:
         conditions = []
         field = self.advance().value
         op = self.advance().value
         val = float(self.advance().value)
         conditions.append((field, op, val))
         while self.peek().type == TT.AND:
-            self.advance()  # 'and' を消費
+            self.advance()
             field = self.advance().value
             op = self.advance().value
             val = float(self.advance().value)

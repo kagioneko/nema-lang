@@ -25,7 +25,7 @@ class TypeVoid:
 
 @dataclass
 class TypePtr:
-    inner: object  # 内包する型
+    inner: object
 
 @dataclass
 class TypeNeuroState:
@@ -45,40 +45,106 @@ def type_str(t) -> str:
     return "unknown"
 
 
-# ===== AST ノード =====
+# ===== 式ノード =====
+
+@dataclass
+class Literal:
+    value: object  # int | float | str | bool
+
+@dataclass
+class VarRef:
+    name: str
+
+@dataclass
+class BinOp:
+    left: object
+    op: str   # + - * / > < >= <= == !=
+    right: object
+
+@dataclass
+class FnCallExpr:
+    name: str
+    args: list
+
+@dataclass
+class MsgSend:
+    receiver: str   # エージェント名
+    message: object # Expr
+
+
+# ===== 文ノード =====
+
+@dataclass
+class LetStmt:
+    name: str
+    value: object  # Expr
+
+@dataclass
+class ReturnStmt:
+    value: object  # Expr | None
+
+@dataclass
+class ExprStmt:
+    expr: object
+
+@dataclass
+class BranchStmt:
+    condition: list  # [(field, op, val), ...]
+    then_body: list
+    else_body: list  # [] if none
+
+@dataclass
+class LoopStmt:
+    body: list
+    condition: list | None  # None = infinite loop
+    until: bool = False     # True = loop until condition becomes true
+
+@dataclass
+class BreakStmt:
+    pass
+
+
+# ===== エージェント宣言ノード =====
 
 @dataclass
 class NeuroStateNode:
     values: dict[str, float]
 
-
 @dataclass
 class MoodDecl:
     state: NeuroStateNode
-
 
 @dataclass
 class Param:
     name: str
     type: NemaType | None = None
 
-
 @dataclass
 class FnDecl:
     name: str
-    params: list[Param]
+    params: list
     ret_type: NemaType | None
-    requires: list[tuple] | None
+    requires: list | None
+    body: list  # list of statement nodes
+
+@dataclass
+class WhenBlock:
+    condition: list  # [(field, op, val), ...]
     body: list
 
+@dataclass
+class AttractorDecl:
+    name: str          # "explore" | "rest" | "social" | "crisis" | "flow"
+    values: dict[str, float]
 
 @dataclass
 class AgentDecl:
     name: str
     mood: MoodDecl | None
-    fns: list[FnDecl]
-
+    fns: list
+    whens: list        # list[WhenBlock]
+    attractors: list   # list[AttractorDecl]
 
 @dataclass
 class Program:
-    agents: list[AgentDecl]
+    agents: list
