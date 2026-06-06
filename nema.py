@@ -10,6 +10,7 @@ from typechecker import typecheck, report
 from compiler import compile_program
 
 DECAY_INTERVAL = 5.0
+VERSION = "0.1.0"
 
 HELP_TEXT = """
 Nema Language Interpreter v0.1.0
@@ -17,7 +18,9 @@ usage: nema <file.nema> [options]
 
 Options:
   --compile   Generate LLVM IR (.ll file)
+  --check     Type-check only (no REPL)
   --live      Live-updating emotion graph (updates in place)
+  --version   Show version
   --help      Show this message
 
 REPL Commands:
@@ -94,8 +97,13 @@ def main():
         print(HELP_TEXT)
         sys.exit(0)
 
-    live_mode   = "--live" in args
+    if "--version" in args or "-v" in args:
+        print(f"nema-lang {VERSION}")
+        sys.exit(0)
+
+    live_mode    = "--live" in args
     compile_mode = "--compile" in args
+    check_mode   = "--check" in args
     path = next((a for a in args if not a.startswith("--")), None)
 
     if not path:
@@ -108,6 +116,12 @@ def main():
     except FileNotFoundError:
         print(f"エラー: ファイルが見つかりません: {path}")
         sys.exit(1)
+
+    if check_mode:
+        tokens = Lexer(src).tokenize()
+        program = Parser(tokens).parse()
+        has_errors = report(typecheck(program))
+        sys.exit(1 if has_errors else 0)
 
     if compile_mode:
         tokens = Lexer(src).tokenize()

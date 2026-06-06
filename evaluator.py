@@ -55,10 +55,17 @@ class NeuroState:
         self.state.update(values)
 
     def check(self, conditions: list) -> bool:
+        """
+        conditions は list[list[tuple]]。外側=OR、内側=AND。
+        any( all(each AND group) for OR groups )
+        """
         ops = {">": float.__gt__, "<": float.__lt__, ">=": float.__ge__,
                "<=": float.__le__, "==": float.__eq__}
-        return all(ops[op](self.state.get(field, 0.0), val)
-                   for field, op, val in conditions)
+        return any(
+            all(ops[op](self.state.get(field, 0.0), val)
+                for field, op, val in group)
+            for group in conditions
+        )
 
     def apply(self, effects: dict):
         for field, delta in effects.items():
@@ -175,11 +182,16 @@ class Agent:
             return f"[エラー] {fn_name} は未定義"
         fn = self.fns[fn_name]
         if fn.requires and not self.mood.check(fn.requires):
-            cond = fn.requires[0]
-            cur = self.mood.state.get(cond[0], 0.0)
+            # 最初のORグループの最初の条件を代表として表示
+            first_cond = fn.requires[0][0]
+            cur = self.mood.state.get(first_cond[0], 0.0)
+            cond_str = " or ".join(
+                " and ".join(f"{f}{o}{v}" for f, o, v in grp)
+                for grp in fn.requires
+            )
             self.mood.apply(ERROR_EFFECTS)
             return (f"[実行拒否] {fn_name}: "
-                    f"{cond[0]}={cur:.2f} が条件 {cond[0]}{cond[1]}{cond[2]} を満たさない")
+                    f"{first_cond[0]}={cur:.2f} — 条件 [{cond_str}] を満たさない")
 
         # ローカルスコープを作って本体実行
         env = {}
@@ -296,7 +308,10 @@ class Agent:
         """tick後にwhenブロックを評価"""
         for wb in self.whens:
             if self.mood.check(wb.condition):
-                cond_str = " and ".join(f"{f}{o}{v}" for f, o, v in wb.condition)
+                cond_str = " or ".join(
+                    " and ".join(f"{f}{o}{v}" for f, o, v in grp)
+                    for grp in wb.condition
+                )
                 print(f"  [when] {self.name}: {cond_str} → トリガー")
                 self._exec_body(wb.body, {})
 
@@ -310,7 +325,13 @@ class Evaluator:
         for decl in program.agents:
             self.agents[decl.name] = Agent(decl)
         self.attractions: dict[tuple[str, str], float] = {}
-        self._pending_messages: list[tuple[str, str, str]] = []  # (from, to, msg)
+        self._pending_messages: list[tuple[str, str, str]] = []
+        # .nema ファイル内の ~~ 宣言を自動セットアップ
+        for attr in getattr(program, "attractions", []):
+            key = tuple(sorted([attr.agent_a, attr.agent_b]))
+            self.attractions[key] = min(1.0, attr.strength)
+            print(f"[引力] {attr.agent_a} ~~ {attr.agent_b} "
+                  f"(strength={attr.strength:.2f})")
 
     def attract(self, a: str, b: str, strength: float = 0.3):
         key = tuple(sorted([a, b]))

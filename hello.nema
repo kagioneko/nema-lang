@@ -8,17 +8,26 @@ agent Neko {
     e: 0.6
   }
 
+  when(dp < 0.3) {
+    log("やる気が下がってきた...")
+  }
+
+  attractor default {
+    dp: 0.8, ac: 0.7, e: 0.6,
+    s: 0.5, ox: 0.6, gaba: 0.4
+  }
+
   @requires(dp > 0.6)
   fn explore(path) {
+    let boost = dp + 0.1
+    return boost
   }
 
-  @requires(ox > 0.3)
-  fn connect(target) {
-  }
+  @requires(ox > 0.5 or s > 0.6)
+  fn connect(target) { }
 
   @requires(gaba > 0.7)
-  fn sleep() {
-  }
+  fn sleep() { }
 }
 
 agent Shii {
@@ -31,11 +40,15 @@ agent Shii {
     e: 0.4
   }
 
-  @requires(ox > 0.5)
-  fn connect(target) {
+  when(s < 0.4) {
+    log("しーちゃん、ちょっと不安定...")
   }
 
-  @requires(s > 0.6)
-  fn rest() {
-  }
+  @requires(s > 0.6 or gaba > 0.5)
+  fn rest() { }
+
+  @requires(ox > 0.6)
+  fn connect(target) { }
 }
+
+Neko ~~ Shii 0.3

@@ -146,5 +146,12 @@ class AgentDecl:
     attractors: list   # list[AttractorDecl]
 
 @dataclass
+class AttractionStmt:
+    agent_a: str
+    agent_b: str
+    strength: float = 0.3
+
+@dataclass
 class Program:
     agents: list
+    attractions: list   # list[AttractionStmt]

@@ -33,9 +33,28 @@ class Parser:
 
     def parse(self) -> Program:
         agents = []
+        attractions = []
         while self.peek().type != TT.EOF:
-            agents.append(self.parse_agent())
-        return Program(agents=agents)
+            t = self.peek()
+            if t.type == TT.AGENT:
+                agents.append(self.parse_agent())
+            elif (t.type == TT.IDENT
+                  and self.pos + 1 < len(self.tokens)
+                  and self.tokens[self.pos + 1].type == TT.ATTRACT):
+                attractions.append(self.parse_top_attraction())
+            else:
+                self.advance()
+        return Program(agents=agents, attractions=attractions)
+
+    def parse_top_attraction(self):
+        from ast_nodes import AttractionStmt
+        a = self.advance().value    # IDENT
+        self.advance()              # ~~
+        b = self.advance().value    # IDENT
+        strength = 0.3
+        if self.peek().type in (TT.FLOAT, TT.INT):
+            strength = float(self.advance().value)
+        return AttractionStmt(agent_a=a, agent_b=b, strength=strength)
 
     def parse_agent(self) -> AgentDecl:
         self.expect(TT.AGENT)
@@ -326,15 +345,29 @@ class Parser:
         return None
 
     def parse_condition(self) -> list:
-        conditions = []
+        """
+        list[list[tuple]] を返す。外側=OR、内側=AND。
+        例: dp > 0.6 and s > 0.4 or ox > 0.8
+            → [[('dp','>',0.6),('s','>',0.4)], [('ox','>',0.8)]]
+        """
+        groups: list[list[tuple]] = []
+        current: list[tuple] = []
+
         field = self.advance().value
         op = self.advance().value
         val = float(self.advance().value)
-        conditions.append((field, op, val))
-        while self.peek().type == TT.AND:
-            self.advance()
+        current.append((field, op, val))
+
+        while self.peek().type in (TT.AND, TT.OR):
+            combiner = self.advance()
             field = self.advance().value
             op = self.advance().value
             val = float(self.advance().value)
-            conditions.append((field, op, val))
-        return conditions
+            if combiner.type == TT.OR:
+                groups.append(current)
+                current = [(field, op, val)]
+            else:
+                current.append((field, op, val))
+
+        groups.append(current)
+        return groups

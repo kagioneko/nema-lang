@@ -154,18 +154,8 @@ class NemaCompiler:
 
         builder = ir.IRBuilder(entry_block)
         if fn_decl.requires:
-            cond_result = ir.Constant(ir.IntType(1), 1)
-            zero = ir.Constant(self.i32, 0)
-            for field, op, threshold in fn_decl.requires:
-                field_idx = NEURO_FIELDS.index(field)
-                idx = ir.Constant(self.i32, field_idx)
-                ptr = builder.gep(mood_gv, [zero, idx])
-                val = builder.load(ptr, name=f"val_{field}")
-                thresh_const = ir.Constant(self.double, threshold)
-                cmp = builder.fcmp_ordered(OPS[op], val, thresh_const,
-                                           name=f"cmp_{field}")
-                cond_result = builder.and_(cond_result, cmp, name="gate")
-            builder.cbranch(cond_result, exec_block, reject_block)
+            gate = self._compile_condition(builder, mood_gv, fn_decl.requires, OPS)
+            builder.cbranch(gate, exec_block, reject_block)
         else:
             builder.branch(exec_block)
 
@@ -178,6 +168,33 @@ class NemaCompiler:
         if fn_decl.name in BUILTIN_IMPLS:
             self._compile_builtin(agent_name, fn_decl, mood_gv,
                                   param_types, ret_llvm)
+
+    def _compile_condition(self, builder: ir.IRBuilder,
+                           mood_gv: ir.GlobalVariable,
+                           requires: list, OPS: dict) -> ir.Value:
+        """
+        list[list[tuple]] を LLVM i1 値にコンパイルする。
+        外側 = OR グループ、内側 = AND 条件。
+        result = OR( AND(each group) )
+        """
+        zero = ir.Constant(self.i32, 0)
+        false_i1 = ir.Constant(ir.IntType(1), 0)
+        gate = false_i1  # OR の初期値は false
+
+        for group in requires:
+            group_cond = ir.Constant(ir.IntType(1), 1)  # AND の初期値は true
+            for field, op, threshold in group:
+                field_idx = NEURO_FIELDS.index(field)
+                idx = ir.Constant(self.i32, field_idx)
+                ptr = builder.gep(mood_gv, [zero, idx])
+                val = builder.load(ptr, name=f"val_{field}")
+                thresh_const = ir.Constant(self.double, threshold)
+                cmp = builder.fcmp_ordered(OPS[op], val, thresh_const,
+                                           name=f"cmp_{field}")
+                group_cond = builder.and_(group_cond, cmp, name="and_cond")
+            gate = builder.or_(gate, group_cond, name="or_gate")
+
+        return gate
 
     def _compile_builtin(self, agent_name: str, fn_decl, mood_gv: ir.GlobalVariable,
                          param_types: list, ret_llvm: ir.Type):
@@ -200,16 +217,8 @@ class NemaCompiler:
 
         builder = ir.IRBuilder(entry)
         if fn_decl.requires:
-            cond = ir.Constant(ir.IntType(1), 1)
-            zero = ir.Constant(self.i32, 0)
-            for field, op, threshold in fn_decl.requires:
-                fi = NEURO_FIELDS.index(field)
-                ptr = builder.gep(mood_gv, [zero, ir.Constant(self.i32, fi)])
-                val = builder.load(ptr)
-                cmp = builder.fcmp_ordered(OPS[op], val,
-                                           ir.Constant(self.double, threshold))
-                cond = builder.and_(cond, cmp)
-            builder.cbranch(cond, exec_b, reject_b)
+            gate = self._compile_condition(builder, mood_gv, fn_decl.requires, OPS)
+            builder.cbranch(gate, exec_b, reject_b)
         else:
             builder.branch(exec_b)
 
