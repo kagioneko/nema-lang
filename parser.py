@@ -100,12 +100,21 @@ class Parser:
         self.expect(TT.LPAREN)
         params = []
         while self.peek().type != TT.RPAREN:
-            params.append(self.advance().value)
+            pname = self.advance().value
+            ptype = None
+            if self.peek().type == TT.COLON:
+                self.advance()
+                ptype = self.parse_type()
+            params.append(Param(name=pname, type=ptype))
             self.skip(TT.COMMA)
         self.expect(TT.RPAREN)
 
-        # 戻り値型はスキップ
-        if self.peek().type == TT.IDENT and self.peek().value in ("String", "Answer", "Float", "Int"):
+        # 戻り値型
+        ret_type = None
+        if self.peek().type == TT.ARROW:
+            self.advance()
+            ret_type = self.parse_type()
+        elif self.peek().type == TT.IDENT and self.peek().value in ("String", "Answer", "Float", "Int"):
             self.advance()
 
         self.expect(TT.LBRACE)
@@ -114,7 +123,32 @@ class Parser:
             body.append(self.advance().value)
         self.expect(TT.RBRACE)
 
-        return FnDecl(name=name, params=params, requires=requires, body=body)
+        return FnDecl(name=name, params=params, ret_type=ret_type,
+                      requires=requires, body=body)
+
+    def parse_type(self):
+        t = self.peek()
+        if t.type == TT.TYPE_I64:
+            self.advance(); return TypeI64()
+        if t.type == TT.TYPE_I32:
+            self.advance(); return TypeI32()
+        if t.type == TT.TYPE_F64:
+            self.advance(); return TypeF64()
+        if t.type == TT.TYPE_BOOL:
+            self.advance(); return TypeBool()
+        if t.type == TT.TYPE_VOID:
+            self.advance(); return TypeVoid()
+        if t.type == TT.TYPE_PTR:
+            self.advance()
+            self.expect(TT.LT)
+            inner = self.parse_type()
+            self.expect(TT.GT)
+            return TypePtr(inner=inner)
+        if t.type == TT.NEUROSTATE:
+            self.advance(); return TypeNeuroState()
+        # 未知型はIDENTとしてスキップ
+        self.advance()
+        return None
 
     def parse_condition(self) -> list[tuple]:
         # "dp > 0.6" などをパース

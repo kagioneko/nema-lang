@@ -24,6 +24,15 @@ class TT(Enum):
     AND = auto()
     OR = auto()
     NOT = auto()
+    LET = auto()
+    RETURN = auto()
+    # 型キーワード
+    TYPE_I64 = auto()
+    TYPE_I32 = auto()
+    TYPE_F64 = auto()
+    TYPE_BOOL = auto()
+    TYPE_PTR = auto()
+    TYPE_VOID = auto()
     # デコレータ
     REQUIRES = auto()
     AFTER = auto()
@@ -84,6 +93,14 @@ KEYWORDS = {
     "and": TT.AND,
     "or": TT.OR,
     "not": TT.NOT,
+    "let": TT.LET,
+    "return": TT.RETURN,
+    "i64": TT.TYPE_I64,
+    "i32": TT.TYPE_I32,
+    "f64": TT.TYPE_F64,
+    "bool": TT.TYPE_BOOL,
+    "ptr": TT.TYPE_PTR,
+    "void": TT.TYPE_VOID,
 }
 
 DECORATORS = {
@@ -218,6 +235,9 @@ class Lexer:
                 if self.peek() == "=":
                     self.advance()
                     tokens.append(Token(TT.MINUS_ASSIGN, "-=", line))
+                elif self.peek() == ">":
+                    self.advance()
+                    tokens.append(Token(TT.ARROW, "->", line))
                 else:
                     tokens.append(Token(TT.MINUS, "-", line))
             elif ch == "=":

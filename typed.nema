@@ -1,0 +1,25 @@
+agent Kernel {
+  mood: NeuroState = {
+    dp: 0.5,
+    s: 0.7,
+    ac: 0.9,
+    ox: 0.4,
+    gaba: 0.5,
+    e: 0.5
+  }
+
+  @requires(ac > 0.8)
+  fn alloc(size: i64) -> ptr<i64> {
+  }
+
+  @requires(ac > 0.5)
+  fn write(addr: ptr<i64>, val: i64) -> void {
+  }
+
+  @requires(dp > 0.3)
+  fn read(addr: ptr<i64>) -> i64 {
+  }
+
+  fn free(addr: ptr<i64>) -> void {
+  }
+}

@@ -9,7 +9,9 @@ Nema → LLVM IR コンパイラ (v0.1)
 """
 
 from llvmlite import ir
-from ast_nodes import Program, AgentDecl
+from ast_nodes import (Program, AgentDecl,
+                       TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid,
+                       TypePtr, TypeNeuroState, NemaType)
 
 NEURO_FIELDS = ["dp", "s", "ac", "ox", "gaba", "e"]
 NEURO_LABELS = {
@@ -46,9 +48,11 @@ class NemaCompiler:
         self.module.triple = "x86_64-unknown-linux-gnu"
 
         self.double = ir.DoubleType()
+        self.i64 = ir.IntType(64)
         self.i32 = ir.IntType(32)
         self.i8p = ir.PointerType(ir.IntType(8))
         self.void = ir.VoidType()
+        self.bool_t = ir.IntType(1)
 
         # printf宣言
         printf_ty = ir.FunctionType(self.i32, [self.i8p], var_arg=True)
@@ -59,6 +63,15 @@ class NemaCompiler:
         self._compile_agents()
         self._compile_all_attractions()
         self._compile_main()
+
+    def nema_to_llvm(self, t) -> ir.Type:
+        if isinstance(t, TypeI64): return self.i64
+        if isinstance(t, TypeI32): return self.i32
+        if isinstance(t, TypeF64): return self.double
+        if isinstance(t, TypeBool): return self.bool_t
+        if isinstance(t, TypeVoid): return self.void
+        if isinstance(t, TypePtr): return ir.PointerType(self.nema_to_llvm(t.inner))
+        return self.void
 
     def _neurostate_type(self) -> ir.ArrayType:
         return ir.ArrayType(self.double, 6)

@@ -151,6 +151,7 @@ class Agent:
             count = self.memory.swap()
             if count:
                 return f"[実行OK] {fn_name}({', '.join(args or [])}) [CPOS] 作業記憶{count}件を長期記憶にスワップ"
+        param_names = [p.name if hasattr(p, 'name') else str(p) for p in fn.params]
         return f"[実行OK] {fn_name}({', '.join(args or [])})"
 
     def display(self) -> str:
