@@ -8,7 +8,8 @@ agent Kernel {
     e: 0.5
   }
 
-  @requires(ac > 0.8)
+  // ac > 0.8 and dp > 0.3 の両方を満たさないとメモリ確保できない
+  @requires(ac > 0.8 and dp > 0.3)
   fn alloc(size: i64) -> ptr<i64> {
   }
 

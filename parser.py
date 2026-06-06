@@ -151,10 +151,16 @@ class Parser:
         return None
 
     def parse_condition(self) -> list[tuple]:
-        # "dp > 0.6" などをパース
+        # "dp > 0.6 and ac > 0.5" などをパース
         conditions = []
         field = self.advance().value
         op = self.advance().value
         val = float(self.advance().value)
         conditions.append((field, op, val))
+        while self.peek().type == TT.AND:
+            self.advance()  # 'and' を消費
+            field = self.advance().value
+            op = self.advance().value
+            val = float(self.advance().value)
+            conditions.append((field, op, val))
         return conditions

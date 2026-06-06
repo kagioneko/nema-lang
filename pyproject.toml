@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nema-lang"
+version = "0.1.0"
+description = "Agent-oriented programming language where emotion is a first-class citizen"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+keywords = ["language", "compiler", "llvm", "ai", "emotion", "agent", "neurostate"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Interpreters",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "llvmlite>=0.43",
+]
+
+[project.scripts]
+nema = "nema:main"
+
+[project.urls]
+Homepage = "https://github.com/kagioneko/nema-lang"
+Repository = "https://github.com/kagioneko/nema-lang"
+"Bug Tracker" = "https://github.com/kagioneko/nema-lang/issues"
+
+[tool.setuptools]
+py-modules = [
+    "lexer",
+    "ast_nodes",
+    "parser",
+    "typechecker",
+    "evaluator",
+    "stdlib",
+    "compiler",
+    "jit_run",
+    "nema",
+]
