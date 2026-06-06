@@ -14,6 +14,7 @@ from ast_nodes import (Program, AgentDecl,
                        TypePtr, TypeNeuroState, NemaType)
 
 NEURO_FIELDS = ["dp", "s", "ac", "ox", "gaba", "e"]
+BUILTIN_IMPLS = {"alloc", "write", "read", "free"}
 NEURO_LABELS = {
     "dp": "Dopamine",
     "s":  "Serotonin",
@@ -54,9 +55,13 @@ class NemaCompiler:
         self.void = ir.VoidType()
         self.bool_t = ir.IntType(1)
 
-        # printf宣言
+        # 外部関数宣言
         printf_ty = ir.FunctionType(self.i32, [self.i8p], var_arg=True)
         self.printf = ir.Function(self.module, printf_ty, name="printf")
+        malloc_ty = ir.FunctionType(self.i8p, [self.i64])
+        self.malloc_fn = ir.Function(self.module, malloc_ty, name="malloc")
+        free_ty = ir.FunctionType(self.void, [self.i8p])
+        self.free_fn = ir.Function(self.module, free_ty, name="free")
 
         self.agent_moods: dict[str, ir.GlobalVariable] = {}
         self._str_counter = 0
@@ -131,25 +136,25 @@ class NemaCompiler:
                     self._compile_after(agent.name, fn_decl.name, gv)
 
     def _compile_fn(self, agent_name: str, fn_decl, mood_gv: ir.GlobalVariable):
-        """
-        感情ゲート付き関数をLLVM IRにコンパイル。
-        戻り値: i32 (0=実行OK, -1=感情ゲート拒否)
-        """
+        """感情ゲート付き関数をLLVM IRにコンパイル"""
         OPS = {">" : "ogt", "<" : "olt", ">=": "oge", "<=": "ole", "==": "oeq"}
 
-        fn_ty = ir.FunctionType(self.i32, [])
-        fn = ir.Function(self.module, fn_ty,
-                         name=f"fn_{agent_name}_{fn_decl.name}")
+        # 引数型・戻り値型を解決
+        param_types = [self.nema_to_llvm(p.type) if p.type else self.i64
+                       for p in fn_decl.params]
+        ret_llvm = self.nema_to_llvm(fn_decl.ret_type) if fn_decl.ret_type else self.i32
 
-        entry_block  = fn.append_basic_block("entry")
-        exec_block   = fn.append_basic_block("exec")
-        reject_block = fn.append_basic_block("reject")
+        # ゲート専用の wrapper 関数（引数なし、i32を返す）は維持
+        gate_ty = ir.FunctionType(self.i32, [])
+        gate_fn = ir.Function(self.module, gate_ty,
+                              name=f"fn_{agent_name}_{fn_decl.name}")
+        entry_block  = gate_fn.append_basic_block("entry")
+        exec_block   = gate_fn.append_basic_block("exec")
+        reject_block = gate_fn.append_basic_block("reject")
 
         builder = ir.IRBuilder(entry_block)
-
         if fn_decl.requires:
-            # 全条件をANDで結合
-            cond_result = ir.Constant(ir.IntType(1), 1)  # true
+            cond_result = ir.Constant(ir.IntType(1), 1)
             zero = ir.Constant(self.i32, 0)
             for field, op, threshold in fn_decl.requires:
                 field_idx = NEURO_FIELDS.index(field)
@@ -164,13 +169,82 @@ class NemaCompiler:
         else:
             builder.branch(exec_block)
 
-        # 実行ブロック: 0を返す
         builder = ir.IRBuilder(exec_block)
         builder.ret(ir.Constant(self.i32, 0))
-
-        # 拒否ブロック: -1を返す
         builder = ir.IRBuilder(reject_block)
         builder.ret(ir.Constant(self.i32, -1))
+
+        # ビルトイン関数の本体実装（感情ゲート + 実処理）
+        if fn_decl.name in BUILTIN_IMPLS:
+            self._compile_builtin(agent_name, fn_decl, mood_gv,
+                                  param_types, ret_llvm)
+
+    def _compile_builtin(self, agent_name: str, fn_decl, mood_gv: ir.GlobalVariable,
+                         param_types: list, ret_llvm: ir.Type):
+        """
+        impl_<Agent>_<fn>: 感情ゲート付きで実際のメモリ操作を実行するLLVM関数
+          alloc(size: i64) -> ptr<i64>  : malloc(size*8) → bitcast
+          write(addr, val) -> void       : store
+          read(addr)       -> i64        : load
+          free(addr)       -> void       : bitcast → free
+        """
+        OPS = {">" : "ogt", "<" : "olt", ">=": "oge", "<=": "ole", "==": "oeq"}
+
+        fn_ty = ir.FunctionType(ret_llvm, param_types)
+        fn = ir.Function(self.module, fn_ty,
+                         name=f"impl_{agent_name}_{fn_decl.name}")
+
+        entry   = fn.append_basic_block("entry")
+        exec_b  = fn.append_basic_block("exec")
+        reject_b = fn.append_basic_block("reject")
+
+        builder = ir.IRBuilder(entry)
+        if fn_decl.requires:
+            cond = ir.Constant(ir.IntType(1), 1)
+            zero = ir.Constant(self.i32, 0)
+            for field, op, threshold in fn_decl.requires:
+                fi = NEURO_FIELDS.index(field)
+                ptr = builder.gep(mood_gv, [zero, ir.Constant(self.i32, fi)])
+                val = builder.load(ptr)
+                cmp = builder.fcmp_ordered(OPS[op], val,
+                                           ir.Constant(self.double, threshold))
+                cond = builder.and_(cond, cmp)
+            builder.cbranch(cond, exec_b, reject_b)
+        else:
+            builder.branch(exec_b)
+
+        # exec ブロック: 実処理
+        builder = ir.IRBuilder(exec_b)
+        fname = fn_decl.name
+        if fname == "alloc":
+            size = fn.args[0]
+            eight = ir.Constant(self.i64, 8)
+            nbytes = builder.mul(size, eight, name="nbytes")
+            raw = builder.call(self.malloc_fn, [nbytes], name="raw")
+            typed_ptr = builder.bitcast(raw, ir.PointerType(self.i64), name="ptr")
+            builder.ret(typed_ptr)
+        elif fname == "write":
+            addr, val = fn.args[0], fn.args[1]
+            builder.store(val, addr)
+            builder.ret_void()
+        elif fname == "read":
+            addr = fn.args[0]
+            val = builder.load(addr, name="val")
+            builder.ret(val)
+        elif fname == "free":
+            addr = fn.args[0]
+            raw = builder.bitcast(addr, self.i8p, name="raw")
+            builder.call(self.free_fn, [raw])
+            builder.ret_void()
+
+        # reject ブロック: 型に応じたデフォルト値を返す
+        builder = ir.IRBuilder(reject_b)
+        if isinstance(ret_llvm, ir.VoidType):
+            builder.ret_void()
+        elif isinstance(ret_llvm, ir.PointerType):
+            builder.ret(ir.Constant(ret_llvm, None))   # null ptr
+        else:
+            builder.ret(ir.Constant(ret_llvm, -1))
 
     def _compile_tick(self, agent_name: str, mood_gv: ir.GlobalVariable):
         """mood_tick_<Agent>: 全フィールドをdecayレートで減衰（0.0未満にならない）"""
