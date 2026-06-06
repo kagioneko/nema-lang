@@ -77,11 +77,25 @@ class MsgSend:
 @dataclass
 class LetStmt:
     name: str
-    value: object  # Expr
+    value: object
+
+@dataclass
+class OwnStmt:
+    name: str
+    value: object   # Expr — 所有権付きで変数を作る
+
+@dataclass
+class ReleaseStmt:
+    name: str       # 所有権を解放する変数名
+
+@dataclass
+class RecvStmt:
+    name: str       # 受け取る変数名
+    from_agent: str # 送り元エージェント名
 
 @dataclass
 class ReturnStmt:
-    value: object  # Expr | None
+    value: object
 
 @dataclass
 class ExprStmt:
@@ -89,15 +103,15 @@ class ExprStmt:
 
 @dataclass
 class BranchStmt:
-    condition: list  # [(field, op, val), ...]
+    condition: list
     then_body: list
-    else_body: list  # [] if none
+    else_body: list
 
 @dataclass
 class LoopStmt:
     body: list
-    condition: list | None  # None = infinite loop
-    until: bool = False     # True = loop until condition becomes true
+    condition: list | None
+    until: bool = False
 
 @dataclass
 class BreakStmt:

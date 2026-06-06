@@ -1,10 +1,38 @@
 import json
 import os
 from ast_nodes import (Program, AgentDecl, NeuroStateNode,
-                       LetStmt, ReturnStmt, ExprStmt, BranchStmt,
+                       LetStmt, OwnStmt, ReleaseStmt, RecvStmt,
+                       ReturnStmt, ExprStmt, BranchStmt,
                        LoopStmt, BreakStmt, WhenBlock, AttractorDecl,
                        Literal, VarRef, BinOp, FnCallExpr, MsgSend)
 from stdlib import StdLib
+
+# インタープリタ用シミュレーテッドヒープ
+_INTERP_HEAP: dict[str, list] = {}
+_HEAP_CTR = [0]
+
+def _heap_alloc(size: int) -> str:
+    _HEAP_CTR[0] += 1
+    addr = f"0x{_HEAP_CTR[0]:04x}"
+    _INTERP_HEAP[addr] = [0] * max(1, int(size))
+    return addr
+
+def _heap_write(addr, val) -> None:
+    if addr in _INTERP_HEAP:
+        _INTERP_HEAP[addr][0] = val
+
+def _heap_read(addr):
+    return _INTERP_HEAP.get(str(addr), [0])[0]
+
+def _heap_free(addr) -> None:
+    _INTERP_HEAP.pop(str(addr), None)
+
+INTERP_BUILTINS = {
+    "alloc": lambda *a: _heap_alloc(a[0]),
+    "write": lambda *a: _heap_write(a[0], a[1]),
+    "read":  lambda *a: _heap_read(a[0]),
+    "free":  lambda *a: _heap_free(a[0]),
+}
 
 CPOS_SWAP_THRESHOLD = 0.7
 CPOS_WORKING_LIMIT  = 5
@@ -169,7 +197,9 @@ class Agent:
         self.whens = decl.whens
         self.memory = CPOSMemory(decl.name)
         self.std = StdLib(self)
-        self.inbox: list[tuple[str, str]] = []  # [(from_agent, message), ...]
+        self.inbox: list[tuple[str, str]] = []
+        self.owned: dict[str, object] = {}   # 所有リソース: {変数名: 値}
+        self._transfer_box: dict[str, object] = {}  # recv 用の受け渡し箱
         # カスタムアトラクターを組み込みアトラクターに上書き
         self.attractors = dict(ATTRACTORS)
         for a in decl.attractors:
@@ -225,6 +255,45 @@ class Agent:
     def _exec_stmt(self, stmt, env: dict):
         if isinstance(stmt, LetStmt):
             env[stmt.name] = self._eval_expr(stmt.value, env)
+            return None
+
+        if isinstance(stmt, OwnStmt):
+            val = self._eval_expr(stmt.value, env)
+            self.owned[stmt.name] = val
+            env[stmt.name] = val
+            self.mood.apply({"gaba": +0.05})
+            print(f"  [own] {self.name}: {stmt.name} = {val!r} を所有")
+            return None
+
+        if isinstance(stmt, ReleaseStmt):
+            if stmt.name not in self.owned:
+                # 二重解放 or 未所有 → 感情ペナルティ
+                self.mood.apply({"s": -0.3, "gaba": +0.1})
+                print(f"  [release ERROR] {self.name}: {stmt.name} を所有していない（二重解放？）")
+                return None
+            val = self.owned.pop(stmt.name)
+            env.pop(stmt.name, None)
+            self.mood.apply({"s": +0.05})
+            print(f"  [release] {self.name}: {stmt.name} を解放")
+            return None
+
+        if isinstance(stmt, RecvStmt):
+            key = f"{stmt.from_agent}→{self.name}:{stmt.name}"
+            if key in self._transfer_box:
+                # コード経由の transfer（non-direct）
+                val = self._transfer_box.pop(key)
+                self.owned[stmt.name] = val
+                env[stmt.name] = val
+                self.mood.apply({"ox": +0.05})
+                print(f"  [recv] {self.name} ← {stmt.from_agent}: {stmt.name} = {val!r}")
+            elif stmt.name in self.owned:
+                # REPL の direct transfer で既に owned にある
+                env[stmt.name] = self.owned[stmt.name]
+                self.mood.apply({"ox": +0.03})
+                print(f"  [recv] {self.name}: {stmt.name} = {self.owned[stmt.name]!r} (転送済み)")
+            else:
+                self.mood.apply({"s": -0.1})
+                print(f"  [recv ERROR] {self.name}: {stmt.from_agent} から {stmt.name} が届いていない")
             return None
 
         if isinstance(stmt, ReturnStmt):
@@ -287,6 +356,9 @@ class Agent:
 
         if isinstance(expr, FnCallExpr):
             args = [self._eval_expr(a, env) for a in expr.args]
+            # インタープリタ組み込み関数（alloc/write/read/free）
+            if expr.name in INTERP_BUILTINS:
+                return INTERP_BUILTINS[expr.name](*args)
             result = self.call(expr.name, args)
             return result
 
@@ -370,6 +442,45 @@ class Evaluator:
             if to_n in self.agents:
                 self.agents[to_n].receive_message(from_n, msg)
         self._pending_messages.clear()
+
+    def transfer_ownership(self, from_name: str, to_name: str,
+                           var_name: str, direct: bool = True) -> bool:
+        """
+        from_agent の owned[var_name] を to_agent に移譲する。
+        direct=True (REPL): 即座に to_agent.owned に入れる
+        direct=False (コード): transfer_box に入れ RecvStmt で取り出す
+        """
+        if from_name not in self.agents or to_name not in self.agents:
+            print(f"[transfer ERROR] エージェントが見つからない")
+            return False
+        from_agent = self.agents[from_name]
+        to_agent   = self.agents[to_name]
+        if var_name not in from_agent.owned:
+            from_agent.mood.apply({"s": -0.2})
+            print(f"[transfer ERROR] {from_name} は {var_name} を所有していない")
+            return False
+        val = from_agent.owned.pop(var_name)
+        if direct:
+            to_agent.owned[var_name] = val
+        else:
+            key = f"{from_name}→{to_name}:{var_name}"
+            to_agent._transfer_box[key] = val
+        from_agent.mood.apply({"ox": +0.03})
+        to_agent.mood.apply({"ox": +0.05})
+        print(f"[transfer] {from_name} → {to_name}: {var_name} = {val!r}")
+        return True
+
+    def show_owned(self, agent_name: str):
+        if agent_name not in self.agents:
+            print(f"[エラー] agent {agent_name} が見つからない")
+            return
+        agent = self.agents[agent_name]
+        if not agent.owned:
+            print(f"[owned] {agent_name}: なし")
+        else:
+            print(f"[owned] {agent_name}:")
+            for k, v in agent.owned.items():
+                print(f"  {k} = {v!r}")
 
     def set_attractor(self, agent_name: str, attractor: str):
         if agent_name not in self.agents:

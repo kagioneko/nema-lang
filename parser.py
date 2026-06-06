@@ -1,5 +1,12 @@
 from lexer import Token, TT, Lexer
-from ast_nodes import *
+from ast_nodes import (
+    Program, AgentDecl, MoodDecl, NeuroStateNode, FnDecl, Param,
+    WhenBlock, AttractorDecl, AttractionStmt,
+    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState,
+    Literal, VarRef, BinOp, FnCallExpr, MsgSend,
+    LetStmt, OwnStmt, ReleaseStmt, RecvStmt,
+    ReturnStmt, ExprStmt, BranchStmt, LoopStmt, BreakStmt,
+)
 
 
 class ParseError(Exception):
@@ -187,6 +194,15 @@ class Parser:
         if t.type == TT.LET:
             return self.parse_let()
 
+        if t.type == TT.OWN:
+            return self.parse_own()
+
+        if t.type == TT.RELEASE:
+            return self.parse_release()
+
+        if t.type == TT.RECV:
+            return self.parse_recv()
+
         if t.type == TT.RETURN:
             return self.parse_return()
 
@@ -223,6 +239,25 @@ class Parser:
         self.expect(TT.ASSIGN)
         value = self.parse_expr()
         return LetStmt(name=name, value=value)
+
+    def parse_own(self) -> OwnStmt:
+        self.expect(TT.OWN)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.ASSIGN)
+        value = self.parse_expr()
+        return OwnStmt(name=name, value=value)
+
+    def parse_release(self) -> ReleaseStmt:
+        self.expect(TT.RELEASE)
+        name = self.expect(TT.IDENT).value
+        return ReleaseStmt(name=name)
+
+    def parse_recv(self) -> RecvStmt:
+        self.expect(TT.RECV)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.FROM)
+        from_agent = self.expect(TT.IDENT).value
+        return RecvStmt(name=name, from_agent=from_agent)
 
     def parse_return(self) -> ReturnStmt:
         self.expect(TT.RETURN)

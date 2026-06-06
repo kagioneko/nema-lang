@@ -37,6 +37,8 @@ REPL Commands:
   log <agent> <msg>               Timestamped log with mood
   rand_mood <agent>               Randomize NeuroState
   summarize <agent>               Swap working memory → long-term
+  owned <agent>                   Show owned resources
+  transfer <from> <to> <var>      Transfer ownership between agents
   shii <agent> [db_path]          Inject しーちゃん spirit.db → agent NeuroState
   tick                            Manually trigger emotion decay + when blocks
   quit / exit                     Exit
@@ -226,6 +228,13 @@ def main():
                       else f"[なし] #{parts[2]} は記憶にない")
             else:
                 print(f"[エラー] agent {parts[1]} が見つからない")
+
+        elif cmd == "owned" and len(parts) == 2:
+            ev.show_owned(parts[1])
+
+        elif cmd == "transfer" and len(parts) == 4:
+            # transfer <from> <to> <var>
+            ev.transfer_ownership(parts[1], parts[2], parts[3])
 
         elif cmd == "shii" and len(parts) >= 2:
             try:
