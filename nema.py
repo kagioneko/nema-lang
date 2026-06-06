@@ -5,13 +5,17 @@ import time
 from lexer import Lexer
 from parser import Parser
 from evaluator import Evaluator
+from typechecker import typecheck, report
 
 DECAY_INTERVAL = 5.0  # 5秒ごとにtick
 
 
-def run(src: str):
+def run(src: str, strict: bool = False):
     tokens = Lexer(src).tokenize()
     program = Parser(tokens).parse()
+    has_errors = report(typecheck(program))
+    if strict and has_errors:
+        sys.exit(1)
     return Evaluator(program)
 
 
