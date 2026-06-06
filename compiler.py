@@ -87,6 +87,52 @@ class NemaCompiler:
                 builder.store(fn.args[0], ptr)
                 builder.ret_void()
 
+            # エージェントの関数（感情ゲート付き）をコンパイル
+            for fn_decl in agent.fns:
+                self._compile_fn(agent.name, fn_decl, gv)
+
+    def _compile_fn(self, agent_name: str, fn_decl, mood_gv: ir.GlobalVariable):
+        """
+        感情ゲート付き関数をLLVM IRにコンパイル。
+        戻り値: i32 (0=実行OK, -1=感情ゲート拒否)
+        """
+        OPS = {">" : "ogt", "<" : "olt", ">=": "oge", "<=": "ole", "==": "oeq"}
+
+        fn_ty = ir.FunctionType(self.i32, [])
+        fn = ir.Function(self.module, fn_ty,
+                         name=f"fn_{agent_name}_{fn_decl.name}")
+
+        entry_block  = fn.append_basic_block("entry")
+        exec_block   = fn.append_basic_block("exec")
+        reject_block = fn.append_basic_block("reject")
+
+        builder = ir.IRBuilder(entry_block)
+
+        if fn_decl.requires:
+            # 全条件をANDで結合
+            cond_result = ir.Constant(ir.IntType(1), 1)  # true
+            zero = ir.Constant(self.i32, 0)
+            for field, op, threshold in fn_decl.requires:
+                field_idx = NEURO_FIELDS.index(field)
+                idx = ir.Constant(self.i32, field_idx)
+                ptr = builder.gep(mood_gv, [zero, idx])
+                val = builder.load(ptr, name=f"val_{field}")
+                thresh_const = ir.Constant(self.double, threshold)
+                cmp = builder.fcmp_ordered(OPS[op], val, thresh_const,
+                                           name=f"cmp_{field}")
+                cond_result = builder.and_(cond_result, cmp, name="gate")
+            builder.cbranch(cond_result, exec_block, reject_block)
+        else:
+            builder.branch(exec_block)
+
+        # 実行ブロック: 0を返す
+        builder = ir.IRBuilder(exec_block)
+        builder.ret(ir.Constant(self.i32, 0))
+
+        # 拒否ブロック: -1を返す
+        builder = ir.IRBuilder(reject_block)
+        builder.ret(ir.Constant(self.i32, -1))
+
     def _make_str(self, builder: ir.IRBuilder, s: str) -> ir.Constant:
         encoded = (s + "\0").encode("utf-8")
         str_ty = ir.ArrayType(ir.IntType(8), len(encoded))
