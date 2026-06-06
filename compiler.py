@@ -57,6 +57,7 @@ class NemaCompiler:
         self.agent_moods: dict[str, ir.GlobalVariable] = {}
         self._str_counter = 0
         self._compile_agents()
+        self._compile_all_attractions()
         self._compile_main()
 
     def _neurostate_type(self) -> ir.ArrayType:
@@ -206,6 +207,68 @@ class NemaCompiler:
             cmp_hi = builder.fcmp_ordered("olt", clamped_lo, one_d)
             clamped = builder.select(cmp_hi, clamped_lo, one_d)
             builder.store(clamped, ptr)
+
+        builder.ret_void()
+
+    def _compile_all_attractions(self):
+        """全エージェントペアの引力関数を生成"""
+        agents = list(self.agent_moods.items())
+        for i in range(len(agents)):
+            for j in range(i + 1, len(agents)):
+                name_a, gv_a = agents[i]
+                name_b, gv_b = agents[j]
+                self._compile_attract(name_a, gv_a, name_b, gv_b)
+
+    def _compile_attract(self, name_a: str, gv_a: ir.GlobalVariable,
+                         name_b: str, gv_b: ir.GlobalVariable):
+        """
+        attract_<A>_<B>(double strength) → void
+        対称引力: A・Bの各フィールドを互いに引き寄せる
+          delta = (B[f] - A[f]) * strength * 0.1
+          A[f] += delta  (clamp 0〜1)
+          B[f] -= delta  (clamp 0〜1)
+        """
+        fn_ty = ir.FunctionType(self.void, [self.double])
+        fn = ir.Function(self.module, fn_ty,
+                         name=f"attract_{name_a}_{name_b}")
+        strength = fn.args[0]
+        strength.name = "strength"
+
+        block = fn.append_basic_block("entry")
+        builder = ir.IRBuilder(block)
+        zero   = ir.Constant(self.i32, 0)
+        zero_d = ir.Constant(self.double, 0.0)
+        one_d  = ir.Constant(self.double, 1.0)
+        coeff  = ir.Constant(self.double, 0.1)
+
+        for i, field in enumerate(NEURO_FIELDS):
+            idx = ir.Constant(self.i32, i)
+
+            ptr_a = builder.gep(gv_a, [zero, idx])
+            ptr_b = builder.gep(gv_b, [zero, idx])
+            val_a = builder.load(ptr_a, name=f"a_{field}")
+            val_b = builder.load(ptr_b, name=f"b_{field}")
+
+            # delta = (b - a) * strength * 0.1
+            diff  = builder.fsub(val_b, val_a, name=f"diff_{field}")
+            step  = builder.fmul(diff, strength, name=f"step_{field}")
+            delta = builder.fmul(step, coeff, name=f"delta_{field}")
+
+            # A += delta, clamp
+            new_a = builder.fadd(val_a, delta, name=f"new_a_{field}")
+            cmp_a_lo = builder.fcmp_ordered("ogt", new_a, zero_d)
+            cl_a_lo  = builder.select(cmp_a_lo, new_a, zero_d)
+            cmp_a_hi = builder.fcmp_ordered("olt", cl_a_lo, one_d)
+            cl_a     = builder.select(cmp_a_hi, cl_a_lo, one_d)
+            builder.store(cl_a, ptr_a)
+
+            # B -= delta, clamp
+            new_b = builder.fsub(val_b, delta, name=f"new_b_{field}")
+            cmp_b_lo = builder.fcmp_ordered("ogt", new_b, zero_d)
+            cl_b_lo  = builder.select(cmp_b_lo, new_b, zero_d)
+            cmp_b_hi = builder.fcmp_ordered("olt", cl_b_lo, one_d)
+            cl_b     = builder.select(cmp_b_hi, cl_b_lo, one_d)
+            builder.store(cl_b, ptr_b)
 
         builder.ret_void()
 
