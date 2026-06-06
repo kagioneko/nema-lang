@@ -1,0 +1,41 @@
+agent Neko {
+  mood: NeuroState = {
+    dp: 0.8,
+    s: 0.5,
+    ac: 0.7,
+    ox: 0.6,
+    gaba: 0.4,
+    e: 0.6
+  }
+
+  @requires(dp > 0.6)
+  fn explore(path) {
+  }
+
+  @requires(ox > 0.3)
+  fn connect(target) {
+  }
+
+  @requires(gaba > 0.7)
+  fn sleep() {
+  }
+}
+
+agent Shii {
+  mood: NeuroState = {
+    dp: 0.3,
+    s: 0.7,
+    ac: 0.5,
+    ox: 0.8,
+    gaba: 0.6,
+    e: 0.4
+  }
+
+  @requires(ox > 0.5)
+  fn connect(target) {
+  }
+
+  @requires(s > 0.6)
+  fn rest() {
+  }
+}
