@@ -1,11 +1,23 @@
 import json
 import os
+import queue
+import threading
 from ast_nodes import (Program, AgentDecl, NeuroStateNode,
-                       LetStmt, OwnStmt, ReleaseStmt, RecvStmt,
+                       LetStmt, OwnStmt, ReleaseStmt, RecvStmt, SpawnStmt,
+                       SendChStmt, RecvChStmt, CloseChStmt,
+                       EmitStmt, OnEventBlock, MatchStmt, MatchArm,
                        ReturnStmt, ExprStmt, BranchStmt,
                        LoopStmt, BreakStmt, WhenBlock, AttractorDecl,
-                       Literal, VarRef, BinOp, FnCallExpr, MsgSend)
+                       Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr,
+                       ChannelCreateExpr)
+
+TRUST_DEFAULT  = 0.5   # 未定義エージェントに対するデフォルト信頼度
+TRUST_GATE     = 0.3   # これを下回ると query/send がブロックされる
+PRIVILEGED_OPS = {"alloc", "free"}  # capability 宣言必須の特権操作
 from stdlib import StdLib
+
+RECV_TIMEOUT = 30.0   # recv のブロッキングタイムアウト（秒）
+MAX_THREADS  = 16     # 同時実行スレッド数の上限
 
 # インタープリタ用シミュレーテッドヒープ
 _INTERP_HEAP: dict[str, list] = {}
@@ -32,6 +44,8 @@ INTERP_BUILTINS = {
     "write": lambda *a: _heap_write(a[0], a[1]),
     "read":  lambda *a: _heap_read(a[0]),
     "free":  lambda *a: _heap_free(a[0]),
+    "log":   lambda *a: print(f"  [log] {' '.join(str(x) for x in a)}"),
+    "print": lambda *a: print(f"  [print] {' '.join(str(x) for x in a)}"),
 }
 
 CPOS_SWAP_THRESHOLD = 0.7
@@ -69,6 +83,34 @@ ATTRACTORS = {
 }
 
 
+_CHANNEL_CLOSED = object()  # close sentinel
+
+
+class NemaChannel:
+    def __init__(self, elem_type=None):
+        self._q = queue.Queue()
+        self.elem_type = elem_type
+        self._closed = False
+
+    def put(self, value):
+        if self._closed:
+            raise RuntimeError("closed チャンネルへの send はできません")
+        self._q.put(value)
+
+    def get(self, timeout=RECV_TIMEOUT):
+        return self._q.get(timeout=timeout)
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._q.put(_CHANNEL_CLOSED)
+
+    def __repr__(self):
+        from ast_nodes import type_str
+        et = type_str(self.elem_type) if self.elem_type else "?"
+        return f"channel<{et}>"
+
+
 class _ReturnSignal(Exception):
     def __init__(self, value):
         self.value = value
@@ -95,14 +137,24 @@ class NeuroState:
             for group in conditions
         )
 
-    def apply(self, effects: dict):
-        for field, delta in effects.items():
-            self.state[field] = max(0.0, min(1.0,
-                                   self.state.get(field, 0.0) + delta))
+    def apply(self, effects: dict, lock=None):
+        def _do():
+            for field, delta in effects.items():
+                self.state[field] = max(0.0, min(1.0,
+                                       self.state.get(field, 0.0) + delta))
+        if lock:
+            with lock: _do()
+        else:
+            _do()
 
-    def tick(self):
-        for field, rate in DECAY_RATES.items():
-            self.state[field] = max(0.0, self.state[field] - rate)
+    def tick(self, lock=None):
+        def _do():
+            for field, rate in DECAY_RATES.items():
+                self.state[field] = max(0.0, self.state[field] - rate)
+        if lock:
+            with lock: _do()
+        else:
+            _do()
 
     def drift_to(self, target: dict, strength: float = 0.05):
         """アトラクターに向けてゆっくり引き寄せる"""
@@ -190,16 +242,31 @@ class CPOSMemory:
 
 
 class Agent:
-    def __init__(self, decl: AgentDecl):
+    def __init__(self, decl: AgentDecl, evaluator=None):
         self.name = decl.name
+        self._ev = evaluator  # Evaluator への back-reference（query で使用）
         self.mood = NeuroState(decl.mood.state.values) if decl.mood else NeuroState({})
         self.fns = {fn.name: fn for fn in decl.fns}
         self.whens = decl.whens
         self.memory = CPOSMemory(decl.name)
         self.std = StdLib(self)
         self.inbox: list[tuple[str, str]] = []
-        self.owned: dict[str, object] = {}   # 所有リソース: {変数名: 値}
-        self._transfer_box: dict[str, object] = {}  # recv 用の受け渡し箱
+        self.mailbox: queue.Queue = queue.Queue()
+        self.mood_lock: threading.Lock = threading.Lock()
+        self.owned: dict[str, object] = {}
+        # trust スコア: agent名 → 0.0〜1.0
+        self.trust: dict[str, float] = dict(decl.trust.scores) if decl.trust else {}
+        # on_event ハンドラ: イベント名 → 文リスト
+        self.on_events: dict[str, list] = {
+            oe.event: oe.body for oe in (decl.on_events or [])
+        }
+        # capability: 許可された操作セット（None なら全許可）
+        self.caps: set | None = set(decl.capability.caps) if decl.capability else None
+        self._transfer_box: dict[str, object] = {}
+        self._threads: list[threading.Thread] = []  # このエージェントのスレッド
+        self._stop_event: threading.Event = threading.Event()
+        # contract 不変条件リスト
+        self.invariants: list = list(decl.contract.invariants) if decl.contract else []
         # カスタムアトラクターを組み込みアトラクターに上書き
         self.attractors = dict(ATTRACTORS)
         for a in decl.attractors:
@@ -212,16 +279,22 @@ class Agent:
             return f"[エラー] {fn_name} は未定義"
         fn = self.fns[fn_name]
         if fn.requires and not self.mood.check(fn.requires):
-            # 最初のORグループの最初の条件を代表として表示
             first_cond = fn.requires[0][0]
             cur = self.mood.state.get(first_cond[0], 0.0)
             cond_str = " or ".join(
                 " and ".join(f"{f}{o}{v}" for f, o, v in grp)
                 for grp in fn.requires
             )
-            self.mood.apply(ERROR_EFFECTS)
-            return (f"[実行拒否] {fn_name}: "
-                    f"{first_cond[0]}={cur:.2f} — 条件 [{cond_str}] を満たさない")
+            self.mood.apply(ERROR_EFFECTS, self.mood_lock)
+            print(f"[実行拒否] {fn_name}: "
+                  f"{first_cond[0]}={cur:.2f} — 条件 [{cond_str}] を満たさない")
+            if fn.on_error_body:
+                print(f"  [@on_error] {fn_name}: fallback 実行")
+                self._exec_body(fn.on_error_body, {})
+                if self._ev and self._ev._pending_events:
+                    self._ev._deliver_events()
+            return f"[on_error] {fn_name}: fallback 完了" if fn.on_error_body else \
+                   f"[実行拒否] {fn_name}: gate NG"
 
         # ローカルスコープを作って本体実行
         env = {}
@@ -232,16 +305,61 @@ class Agent:
         ret_val = self._exec_body(fn.body, env)
 
         if fn_name in AFTER_EFFECTS:
-            self.mood.apply(AFTER_EFFECTS[fn_name])
-        self.mood.tick()
+            self.mood.apply(AFTER_EFFECTS[fn_name], self.mood_lock)
+        self.mood.tick(self.mood_lock)
         self.memory.forget_oldest()
         if self.mood.gaba >= CPOS_SWAP_THRESHOLD:
             count = self.memory.swap()
             if count:
                 return f"[実行OK] {fn_name} [CPOS] 作業記憶{count}件を長期記憶にスワップ"
 
+        # @ensures 事後条件チェック
+        if fn.ensures and not self.mood.check(fn.ensures):
+            cond_str = " or ".join(
+                " and ".join(f"{f}{o}{v}" for f, o, v in grp)
+                for grp in fn.ensures
+            )
+            self.mood.apply(ERROR_EFFECTS, self.mood_lock)
+            print(f"  [@ensures FAIL] {fn_name}: 事後条件 [{cond_str}] を満たさない")
+            if fn.on_error_body:
+                print(f"  [@on_error] {fn_name}: fallback 実行")
+                self._exec_body(fn.on_error_body, {})
+                if self._ev and self._ev._pending_events:
+                    self._ev._deliver_events()
+            return f"[ensures NG] {fn_name}: 事後条件違反"
+
+        # emit されたイベントを即座に配信
+        if self._ev and self._ev._pending_events:
+            self._ev._deliver_events()
+
+        self._check_invariants(f"call:{fn_name}")
+
         ret_str = f" → {ret_val}" if ret_val is not None else ""
         return f"[実行OK] {fn_name}({', '.join(str(a) for a in (args or []))}){ret_str}"
+
+    def _check_invariants(self, context: str = ""):
+        """contract 不変条件を全てチェックし、違反があればログ + ペナルティ"""
+        if not self.invariants:
+            return
+        ops = {">": float.__gt__, "<": float.__lt__, ">=": float.__ge__,
+               "<=": float.__le__, "==": float.__eq__}
+        for cond in self.invariants:
+            cond_str = " or ".join(
+                " and ".join(f"{f}{o}{v}" for f, o, v in grp)
+                for grp in cond
+            )
+            ok = any(
+                all(ops[op](self.mood.state.get(field, 0.0), val)
+                    for field, op, val in group)
+                for group in cond
+            )
+            if not ok:
+                field0 = cond[0][0][0]
+                cur_val = self.mood.state.get(field0, 0.0)
+                self.mood.apply({"s": -0.1, "gaba": +0.05}, self.mood_lock)
+                print(f"  [contract FAIL] {self.name} [{context}]: "
+                      f"不変条件違反 [{cond_str}] "
+                      f"(現在値: {cur_val:.3f})")
 
     def _exec_body(self, body: list, env: dict) -> object:
         """関数本体の文リストを実行し、return値を返す"""
@@ -261,39 +379,83 @@ class Agent:
             val = self._eval_expr(stmt.value, env)
             self.owned[stmt.name] = val
             env[stmt.name] = val
-            self.mood.apply({"gaba": +0.05})
+            self.mood.apply({"gaba": +0.05}, self.mood_lock)
             print(f"  [own] {self.name}: {stmt.name} = {val!r} を所有")
             return None
 
         if isinstance(stmt, ReleaseStmt):
             if stmt.name not in self.owned:
-                # 二重解放 or 未所有 → 感情ペナルティ
-                self.mood.apply({"s": -0.3, "gaba": +0.1})
+                self.mood.apply({"s": -0.3, "gaba": +0.1}, self.mood_lock)
                 print(f"  [release ERROR] {self.name}: {stmt.name} を所有していない（二重解放？）")
                 return None
             val = self.owned.pop(stmt.name)
             env.pop(stmt.name, None)
-            self.mood.apply({"s": +0.05})
+            self.mood.apply({"s": +0.05}, self.mood_lock)
             print(f"  [release] {self.name}: {stmt.name} を解放")
             return None
 
         if isinstance(stmt, RecvStmt):
+            if stmt.from_agent is None:
+                # mailbox からブロッキング受信（並行モード）
+                try:
+                    from_ag, msg = self.mailbox.get(timeout=RECV_TIMEOUT)
+                    self.owned[stmt.name] = msg
+                    env[stmt.name] = msg
+                    self.mood.apply({"ox": +0.05}, self.mood_lock)
+                    print(f"  [recv] {self.name} ← mailbox ({from_ag}): {stmt.name} = {msg!r}")
+                except queue.Empty:
+                    self.mood.apply({"s": -0.1}, self.mood_lock)
+                    print(f"  [recv TIMEOUT] {self.name}: mailbox recv タイムアウト ({RECV_TIMEOUT}s)")
+                return None
             key = f"{stmt.from_agent}→{self.name}:{stmt.name}"
             if key in self._transfer_box:
                 # コード経由の transfer（non-direct）
                 val = self._transfer_box.pop(key)
                 self.owned[stmt.name] = val
                 env[stmt.name] = val
-                self.mood.apply({"ox": +0.05})
+                self.mood.apply({"ox": +0.05}, self.mood_lock)
                 print(f"  [recv] {self.name} ← {stmt.from_agent}: {stmt.name} = {val!r}")
             elif stmt.name in self.owned:
                 # REPL の direct transfer で既に owned にある
                 env[stmt.name] = self.owned[stmt.name]
-                self.mood.apply({"ox": +0.03})
+                self.mood.apply({"ox": +0.03}, self.mood_lock)
                 print(f"  [recv] {self.name}: {stmt.name} = {self.owned[stmt.name]!r} (転送済み)")
             else:
-                self.mood.apply({"s": -0.1})
+                self.mood.apply({"s": -0.1}, self.mood_lock)
                 print(f"  [recv ERROR] {self.name}: {stmt.from_agent} から {stmt.name} が届いていない")
+            return None
+
+        if isinstance(stmt, EmitStmt):
+            if self.caps is not None and "emit" not in self.caps:
+                self.mood.apply({"s": -0.1}, self.mood_lock)
+                print(f"  [capability DENIED] {self.name}: emit 権限がない")
+                return None
+            value = self._eval_expr(stmt.value, env) if stmt.value is not None else None
+            if self._ev:
+                self._ev._pending_events.append((self.name, stmt.event, value))
+            self.mood.apply({"e": +0.03}, self.mood_lock)
+            print(f"  [emit] {self.name} → '{stmt.event}' = {value!r}")
+            return None
+
+        if isinstance(stmt, SpawnStmt):
+            if stmt.fn_name not in self.fns:
+                self.mood.apply(ERROR_EFFECTS, self.mood_lock)
+                print(f"  [spawn ERROR] {self.name}: {stmt.fn_name} は未定義")
+                return None
+            active = sum(1 for t in self._threads if t.is_alive())
+            if active >= MAX_THREADS:
+                print(f"  [spawn ERROR] {self.name}: スレッド上限 ({MAX_THREADS}) 到達")
+                return None
+            args = [self._eval_expr(a, env) for a in stmt.args]
+            t = threading.Thread(
+                target=self.call,
+                args=(stmt.fn_name, args),
+                daemon=True,
+                name=f"{self.name}.{stmt.fn_name}",
+            )
+            self._threads.append(t)
+            t.start()
+            print(f"  [spawn] {self.name}: {stmt.fn_name} をスレッドで起動")
             return None
 
         if isinstance(stmt, ReturnStmt):
@@ -327,6 +489,63 @@ class Agent:
         if isinstance(stmt, BreakStmt):
             raise _BreakSignal()
 
+        if isinstance(stmt, MatchStmt):
+            subj = self._eval_expr(stmt.subject, env)
+            ops = {">": float.__gt__, "<": float.__lt__,
+                   ">=": float.__ge__, "<=": float.__le__, "==": float.__eq__}
+            for arm in stmt.arms:
+                if arm.op is None:  # default _
+                    return self._exec_body(arm.body, env)
+                thresh = self._eval_expr(arm.threshold, env)
+                try:
+                    matched = ops[arm.op](float(subj), float(thresh))
+                except (TypeError, ValueError):
+                    matched = False
+                if matched:
+                    return self._exec_body(arm.body, env)
+            return None
+
+        if isinstance(stmt, SendChStmt):
+            ch = env.get(stmt.channel) or self.owned.get(stmt.channel)
+            if not isinstance(ch, NemaChannel):
+                print(f"  [send ERROR] {self.name}: '{stmt.channel}' はチャンネルではない")
+                return None
+            val = self._eval_expr(stmt.value, env)
+            try:
+                ch.put(val)
+                self.mood.apply({"ac": +0.02}, self.mood_lock)
+                print(f"  [send] {self.name} → {stmt.channel}: {val!r}")
+            except RuntimeError as e:
+                print(f"  [send ERROR] {self.name}: {e}")
+            return None
+
+        if isinstance(stmt, RecvChStmt):
+            ch = env.get(stmt.channel) or self.owned.get(stmt.channel)
+            if not isinstance(ch, NemaChannel):
+                print(f"  [recv ERROR] {self.name}: '{stmt.channel}' はチャンネルではない")
+                return None
+            try:
+                val = ch.get(timeout=RECV_TIMEOUT)
+            except queue.Empty:
+                self.mood.apply({"s": -0.05}, self.mood_lock)
+                print(f"  [recv TIMEOUT] {self.name}: {stmt.channel} タイムアウト")
+                raise _BreakSignal()
+            if val is _CHANNEL_CLOSED:
+                raise _BreakSignal()  # close されたら loop を抜ける
+            env[stmt.var] = val
+            self.mood.apply({"ox": +0.03}, self.mood_lock)
+            print(f"  [recv] {self.name} ← {stmt.channel}: {stmt.var} = {val!r}")
+            return self._exec_body(stmt.body, env)
+
+        if isinstance(stmt, CloseChStmt):
+            ch = env.get(stmt.channel) or self.owned.get(stmt.channel)
+            if not isinstance(ch, NemaChannel):
+                print(f"  [close ERROR] {self.name}: '{stmt.channel}' はチャンネルではない")
+                return None
+            ch.close()
+            print(f"  [close] {self.name}: {stmt.channel} をクローズ")
+            return None
+
         return None
 
     def _eval_expr(self, expr, env: dict) -> object:
@@ -358,22 +577,88 @@ class Agent:
             args = [self._eval_expr(a, env) for a in expr.args]
             # インタープリタ組み込み関数（alloc/write/read/free）
             if expr.name in INTERP_BUILTINS:
+                # capability チェック
+                # 特権操作: capability 宣言がなければ即ブロック
+                # 非特権操作: capability 宣言があるが含まれない場合のみブロック
+                is_privileged = expr.name in PRIVILEGED_OPS
+                denied = (
+                    (is_privileged and (self.caps is None or expr.name not in self.caps))
+                    or (not is_privileged and self.caps is not None and expr.name not in self.caps)
+                )
+                if denied:
+                    self.mood.apply({"s": -0.2, "gaba": +0.1}, self.mood_lock)
+                    print(f"  [capability DENIED] {self.name}: "
+                          f"{expr.name!r} の権限がない")
+                    return None
                 return INTERP_BUILTINS[expr.name](*args)
             result = self.call(expr.name, args)
             return result
 
         if isinstance(expr, MsgSend):
             msg = self._eval_expr(expr.message, env)
-            # メッセージをinboxへ; 実際の配信はEvaluator.tick()で行う
             self.inbox.append((self.name, str(msg)))
             return f"→{expr.receiver}: {msg}"
 
+        if isinstance(expr, QueryExpr):
+            return self._eval_query(expr)
+
+        if isinstance(expr, ChannelCreateExpr):
+            ch = NemaChannel(elem_type=expr.elem_type)
+            print(f"  [channel] {self.name}: {ch} を作成")
+            return ch
+
+        return None
+
+    def _eval_query(self, expr: QueryExpr) -> object:
+        """他エージェントの状態を読み取る（所有権移動なし）"""
+        if self._ev is None:
+            print(f"  [query ERROR] {self.name}: evaluator 未設定")
+            return None
+        target = self._ev.agents.get(expr.agent)
+        if target is None:
+            self.mood.apply({"s": -0.05}, self.mood_lock)
+            print(f"  [query ERROR] {self.name}: agent {expr.agent!r} が見つからない")
+            return None
+        # trust ゲート: target が trust を宣言していれば未知エージェントはブロック
+        if target.trust:
+            trust_score = target.trust.get(self.name, 0.0)
+        else:
+            trust_score = TRUST_DEFAULT
+        if trust_score < TRUST_GATE:
+            self.mood.apply({"s": -0.05, "ox": -0.03}, self.mood_lock)
+            print(f"  [query BLOCKED] {expr.agent} は {self.name} を信頼していない"
+                  f" (trust={trust_score:.2f} < {TRUST_GATE})")
+            return None
+
+        if expr.field == "mood":
+            # 全NeuroStateをdictで返す
+            val = dict(target.mood.state)
+            self.mood.apply({"ac": +0.03}, self.mood_lock)
+            print(f"  [query] {self.name} ← {expr.agent}.mood = {val}")
+            return val
+
+        if expr.field == "owned":
+            var = expr.var
+            val = target.owned.get(var)
+            self.mood.apply({"ac": +0.03}, self.mood_lock)
+            print(f"  [query] {self.name} ← {expr.agent}.owned[{var!r}] = {val!r}")
+            return val
+
+        # NeuroState フィールド
+        if expr.field in NEURO_FIELDS:
+            val = target.mood.state.get(expr.field, 0.0)
+            self.mood.apply({"ac": +0.02}, self.mood_lock)
+            print(f"  [query] {self.name} ← {expr.agent}.{expr.field} = {val:.3f}")
+            return val
+
+        print(f"  [query ERROR] {self.name}: 不明なフィールド {expr.field!r}")
         return None
 
     def receive_message(self, from_agent: str, message: str):
-        """メッセージ受信 → ox/s に影響"""
+        """メッセージ受信 → ox/s に影響 + mailbox に push"""
         self.inbox.append((from_agent, message))
-        self.mood.apply({"ox": +0.05, "s": +0.03})
+        self.mailbox.put((from_agent, message))
+        self.mood.apply({"ox": +0.05, "s": +0.03}, self.mood_lock)
         print(f"  [{self.name}] ← {from_agent}: {message!r} (ox+0.05, s+0.03)")
 
     def check_whens(self):
@@ -395,15 +680,24 @@ class Evaluator:
     def __init__(self, program: Program):
         self.agents: dict[str, Agent] = {}
         for decl in program.agents:
-            self.agents[decl.name] = Agent(decl)
+            a = Agent(decl)
+            a._ev = self
+            self.agents[decl.name] = a
         self.attractions: dict[tuple[str, str], float] = {}
         self._pending_messages: list[tuple[str, str, str]] = []
+        self._pending_events: list[tuple[str, str, object]] = []
         # .nema ファイル内の ~~ 宣言を自動セットアップ
         for attr in getattr(program, "attractions", []):
             key = tuple(sorted([attr.agent_a, attr.agent_b]))
             self.attractions[key] = min(1.0, attr.strength)
             print(f"[引力] {attr.agent_a} ~~ {attr.agent_b} "
                   f"(strength={attr.strength:.2f})")
+        # トップレベル trust 宣言
+        for ts in getattr(program, "trusts", []) or []:
+            if ts.agent_a in self.agents:
+                self.agents[ts.agent_a].trust[ts.agent_b] = min(1.0, ts.score)
+                print(f"[信頼] {ts.agent_a} trust {ts.agent_b} "
+                      f"(score={ts.score:.2f})")
 
     def attract(self, a: str, b: str, strength: float = 0.3):
         key = tuple(sorted([a, b]))
@@ -431,17 +725,61 @@ class Evaluator:
                 target = agent.attractors[agent.active_attractor]
                 agent.mood.drift_to(target, strength=0.05)
             agent.check_whens()
+            agent._check_invariants("tick")
         self.apply_attractions()
         self._deliver_messages()
+        self._deliver_events()
 
     def send_message(self, from_name: str, to_name: str, message: str):
         self._pending_messages.append((from_name, to_name, message))
 
     def _deliver_messages(self):
         for from_n, to_n, msg in self._pending_messages:
-            if to_n in self.agents:
-                self.agents[to_n].receive_message(from_n, msg)
+            if to_n not in self.agents:
+                continue
+            target = self.agents[to_n]
+            # trust チェック
+            if target.trust:
+                score = target.trust.get(from_n, 0.0)
+            else:
+                score = TRUST_DEFAULT
+            if score < TRUST_GATE:
+                print(f"  [send BLOCKED] {to_n} は {from_n} を信頼していない"
+                      f" (trust={score:.2f})")
+                continue
+            target.receive_message(from_n, msg)
         self._pending_messages.clear()
+
+    def _deliver_events(self):
+        """pending_events を全エージェントの on_event ハンドラに配信"""
+        for from_ag, event, value in self._pending_events:
+            for name, agent in self.agents.items():
+                if name == from_ag:
+                    continue
+                handler = agent.on_events.get(event)
+                if handler:
+                    env = {"event": event, "value": value, "from": from_ag}
+                    agent.mood.apply({"ox": +0.03, "e": +0.02}, agent.mood_lock)
+                    print(f"  [on {event!r}] {name} ← {from_ag}: value={value!r}")
+                    agent._exec_body(handler, env)
+        self._pending_events.clear()
+
+    def emit(self, from_name: str, event: str, value=None):
+        """REPL からイベントを発火"""
+        if from_name not in self.agents:
+            print(f"[エラー] agent {from_name} が見つからない")
+            return
+        self._pending_events.append((from_name, event, value))
+        print(f"[emit] {from_name} → '{event}' = {value!r}")
+        self._deliver_events()
+
+    def set_trust(self, from_name: str, to_name: str, score: float):
+        """REPL / コードから信頼スコアを設定"""
+        if from_name not in self.agents:
+            print(f"[エラー] agent {from_name} が見つからない")
+            return
+        self.agents[from_name].trust[to_name] = max(0.0, min(1.0, score))
+        print(f"[信頼] {from_name} trust {to_name} (score={score:.2f})")
 
     def transfer_ownership(self, from_name: str, to_name: str,
                            var_name: str, direct: bool = True) -> bool:
@@ -522,3 +860,37 @@ class Evaluator:
                 if agent_name in (a, b):
                     self.attractions[(a, b)] = min(1.0, self.attractions[(a, b)] + 0.01)
         print(result)
+
+    def spawn(self, agent_name: str, fn_name: str, args: list = None) -> bool:
+        """エージェントの関数をバックグラウンドスレッドで実行"""
+        if agent_name not in self.agents:
+            print(f"[エラー] agent {agent_name} が見つからない")
+            return False
+        agent = self.agents[agent_name]
+        active = sum(1 for t in agent._threads if t.is_alive())
+        if active >= MAX_THREADS:
+            print(f"[spawn ERROR] {agent_name}: スレッド上限 ({MAX_THREADS}) 到達")
+            return False
+        t = threading.Thread(
+            target=agent.call,
+            args=(fn_name, args or []),
+            daemon=True,
+            name=f"{agent_name}.{fn_name}",
+        )
+        agent._threads.append(t)
+        t.start()
+        print(f"[spawn] {agent_name}.{fn_name} をバックグラウンドで起動")
+        return True
+
+    def show_threads(self):
+        """全エージェントのスレッド状態を表示"""
+        total = 0
+        for name, agent in self.agents.items():
+            alive = [t for t in agent._threads if t.is_alive()]
+            total += len(alive)
+            if alive:
+                print(f"  {name}: {len(alive)} スレッド稼働中")
+                for t in alive:
+                    print(f"    [{t.name}]")
+        if total == 0:
+            print("  スレッドなし（全完了）")

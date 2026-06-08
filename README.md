@@ -1,6 +1,6 @@
 # Nema Language
 
-**NeuroState + Emilia** — An agent-oriented programming language where emotion is a first-class citizen.
+**Experimental agent-oriented language for compiling NeuroState into control flow.**
 
 > "Agents don't just compute. They feel."
 
@@ -8,14 +8,38 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![Nema REPL demo](demo.gif)
+
+---
+
+## Browser Demo (WebAssembly)
+
+Open [`browser_demo/index.html`](browser_demo/index.html) directly in any modern browser — no server needed.
+
+The demo compiles two agents (`Emilia` and `Kernel`) from `.nema` source to WASM. Each slider writes directly to a WASM `f64` global; gate conditions are re-evaluated in real time. Drag a field below its threshold and watch the gate flip from ✅ to ❌ instantly.
+
+```
+Emilia_explore()    requires dp > 0.6     → dp + ac
+Emilia_rest()       requires s > 0.5 ∧ gaba > 0.4  → s + gaba
+Emilia_connect()    requires ox > 0.6     → ox + s
+Emilia_mood_score() (no gate)             → Σ all fields
+```
+
+To regenerate after editing `demo.nema`:
+```bash
+python3 nema.py browser_demo/demo.nema --wasm
+python3 browser_demo/gen.py
+```
+
 ---
 
 ## What is Nema?
 
-Nema is a programming language where every agent has a **NeuroState** — a 6-dimensional emotional state based on neurotransmitters. Emotions gate function execution, propagate between agents, decay over time, and drive memory management.
+Nema is a research prototype language where every agent carries a **NeuroState** — a 6-dimensional affective state based on neurotransmitters (dopamine, serotonin, acetylcholine, oxytocin, GABA, endorphin). Emotional state gates function execution, propagates between agents, decays over time, and drives memory management.
 
-**`@requires(dp > 0.6)` compiles to a machine-level `fcmp ogt` instruction.**  
-The world's first emotional conditional branch.
+**`@requires(dp > 0.6)` compiles directly to `fcmp ogt` + conditional branch in LLVM IR** — not a runtime flag, not a config value, machine code.
+
+One of the first experimental languages to compile agent affective state (NeuroState) into executable control flow via LLVM IR.
 
 ---
 
@@ -41,6 +65,10 @@ python -m jit_run hello.nema
 # Generate LLVM IR
 nema hello.nema --compile
 # → produces hello.ll
+
+# Compile to WebAssembly (WAT + WASM binary via wabt)
+nema hello.nema --wasm
+# → produces hello.wat + hello.wasm
 ```
 
 ---
@@ -132,6 +160,10 @@ Nema source (.nema)
 | `log <agent> <msg>` | Log with emotional context |
 | `rand_mood <agent>` | Randomize NeuroState |
 | `summarize <agent>` | Swap working memory to long-term storage |
+| `spawn <agent> <fn>` | Run agent function in background thread |
+| `threads` | Show all active threads |
+| `transfer <from> <to> <var>` | Transfer ownership between agents |
+| `shii <agent>` | Inject しーちゃん spirit.db → NeuroState |
 
 ---
 
@@ -229,6 +261,70 @@ reject:
 
 ---
 
+## Static Type Checking
+
+```bash
+nema myfile.nema --check
+```
+
+Catches errors at parse time, before any execution:
+
+```
+[WARN]  Neko.explore: @requires(dp > 1.5) — always fails (dp max is 1.0)
+[ERROR] Kernel.alloc: unknown NeuroState field 'motivation' (use: dp s ac ox gaba e)
+[ERROR] Kernel.alloc: NeuroState value 1.8 out of range [0.0, 1.0]
+```
+
+Exit code `0` = clean, `1` = errors found.
+
+---
+
+## Safety Model
+
+Nema has six layers of execution safety. No single layer is sufficient — they compose.
+
+```
+Layer 1: Emotion Gate       @requires(dp > 0.6)  → fcmp ogt in LLVM IR
+Layer 2: Post-condition     @ensures(gaba > 0.3) → verified after execution; runs @on_error on fail
+Layer 3: Fallback           @on_error { ... }    → runs on gate fail OR ensures fail
+Layer 4: Static Type Check  unknown fields / out-of-range values → compile-time error
+Layer 5: Ownership          own / release / recv — double-free raises serotonin penalty
+Layer 6: Capability         capability: { alloc, emit } — privileged ops (alloc/free) require declaration
+Layer 7: Trust Score        trust: { AgentB: 0.8 } — query/send blocked if trust < 0.3
+Layer 8: Memory Isolation   CPOS working memory (max 5) / long-term JSON / auto-swap
+```
+
+**Emotion gates express agent readiness, not permissions.**
+Capabilities enforce permissions. Trust enforces identity. All three compose.
+
+```nema
+agent Kernel {
+  capability: { alloc, free, write, read, emit }
+  trust: { Process: 0.8 }
+
+  @requires(ac > 0.8)      // Layer 1: must be focused
+  @ensures(gaba > 0.3)     // Layer 2: must remain calm after
+  @on_error { emit kernel_fail 1 }  // Layer 3: fallback if either fails
+  fn alloc_buf(size: i64) -> ptr<i64> {
+    own buf = alloc(size)  // Layer 5+6: owned + kernel-only
+    return buf
+  }
+}
+```
+
+---
+
+## Examples
+
+| File | Demonstrates |
+|------|-------------|
+| `hello.nema` | Emotion gates, `when` blocks, agent attraction |
+| `memory.nema` | CPOS working / long-term memory, `gaba`-triggered swap |
+| `kernel.nema` | Emotion-gated `malloc` / `write` / `read` / `free`, ownership transfer |
+| `concurrent.nema` | Multi-agent concurrency, mailbox `recv`, `spawn` |
+
+---
+
 ## Files
 
 | File | Role |
@@ -237,14 +333,13 @@ reject:
 | `parser.py` | AST parser |
 | `ast_nodes.py` | AST node definitions |
 | `typechecker.py` | Static type checker |
-| `evaluator.py` | Interpreter runtime |
-| `stdlib.py` | Standard library |
+| `evaluator.py` | Interpreter runtime + concurrent execution |
+| `stdlib.py` | Standard library (introspect, empathize, CPOS) |
 | `compiler.py` | LLVM IR code generator |
 | `jit_run.py` | JIT compiler + runner |
 | `nema.py` | Entry point + REPL |
-| `hello.nema` | Example: multi-agent with emotion |
-| `typed.nema` | Example: typed memory ops |
 | `benchmark.py` | JIT vs interpreter benchmarks |
+| `shiichan.py` | しーちゃん spirit.db → NeuroState bridge |
 
 ---
 

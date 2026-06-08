@@ -10,7 +10,7 @@ from typechecker import typecheck, report
 from compiler import compile_program
 
 DECAY_INTERVAL = 5.0
-VERSION = "0.1.0"
+VERSION = "0.3.1"
 
 HELP_TEXT = """
 Nema Language Interpreter v0.1.0
@@ -18,6 +18,7 @@ usage: nema <file.nema> [options]
 
 Options:
   --compile   Generate LLVM IR (.ll file)
+  --wasm      Generate WAT (WASM Text Format, convert with wat2wasm)
   --check     Type-check only (no REPL)
   --live      Live-updating emotion graph (updates in place)
   --version   Show version
@@ -40,14 +41,18 @@ REPL Commands:
   owned <agent>                   Show owned resources
   transfer <from> <to> <var>      Transfer ownership between agents
   shii <agent> [db_path]          Inject しーちゃん spirit.db → agent NeuroState
+  emit <agent> <event> [value]    Emit event from agent (trust-gated)
+  trust <from> <to> <score>       Set trust score between agents
+  spawn <agent> <fn> [args...]    Run agent function in background thread
+  threads                         Show all running threads
   tick                            Manually trigger emotion decay + when blocks
   quit / exit                     Exit
 """.strip()
 
 
-def run(src: str, strict: bool = False):
+def run(src: str, strict: bool = False, base_dir: str = None):
     tokens = Lexer(src).tokenize()
-    program = Parser(tokens).parse()
+    program = Parser(tokens, base_dir=base_dir).parse()
     has_errors = report(typecheck(program))
     if strict and has_errors:
         sys.exit(1)
@@ -106,6 +111,7 @@ def main():
     live_mode    = "--live" in args
     compile_mode = "--compile" in args
     check_mode   = "--check" in args
+    wasm_mode    = "--wasm" in args
     path = next((a for a in args if not a.startswith("--")), None)
 
     if not path:
@@ -138,7 +144,36 @@ def main():
         print(f"✅ LLVM IR生成: {out_path}")
         sys.exit(0)
 
-    ev = run(src)
+    if wasm_mode:
+        from wasm_compiler import compile_to_wat
+        tokens = Lexer(src).tokenize()
+        program = Parser(tokens, base_dir=os.path.dirname(os.path.abspath(path))).parse()
+        has_errors = report(typecheck(program))
+        if has_errors:
+            sys.exit(1)
+        wat = compile_to_wat(program)
+        out_wat = path.replace(".nema", ".wat")
+        with open(out_wat, "w") as f:
+            f.write(wat)
+        print(f"✅ WAT生成: {out_wat}")
+        # wat2wasm が使えれば自動でバイナリ変換
+        import shutil, subprocess
+        w2w = shutil.which("wat2wasm")
+        if w2w:
+            out_wasm = out_wat.replace(".wat", ".wasm")
+            r = subprocess.run([w2w, out_wat, "-o", out_wasm], capture_output=True, text=True)
+            if r.returncode == 0:
+                size = os.path.getsize(out_wasm)
+                print(f"✅ WASM生成: {out_wasm} ({size} bytes)")
+                print(f"   実行: wasm-interp {out_wasm} --run-all-exports")
+            else:
+                print(f"⚠ wat2wasm エラー: {r.stderr.strip()}")
+                print(f"   手動変換: wat2wasm {out_wat} -o {out_wasm}")
+        else:
+            print(f"   変換: wat2wasm {out_wat} -o {out_wat.replace('.wat', '.wasm')}")
+        sys.exit(0)
+
+    ev = run(src, base_dir=os.path.dirname(os.path.abspath(path)))
 
     if live_mode:
         # ライブモード: 初期描画用の空行を確保
@@ -235,6 +270,49 @@ def main():
         elif cmd == "transfer" and len(parts) == 4:
             # transfer <from> <to> <var>
             ev.transfer_ownership(parts[1], parts[2], parts[3])
+
+        elif cmd == "query" and len(parts) >= 3:
+            # query <observer> <field> from <target>
+            # query <observer> owned <var> from <target>
+            # query <agent> <field>               ← 自分自身を調べる
+            from ast_nodes import QueryExpr as QE
+            observer = ev.agents.get(parts[1])
+            if not observer:
+                print(f"[エラー] agent {parts[1]} が見つからない")
+            elif "from" in parts:
+                fi = parts.index("from")
+                field = " ".join(parts[2:fi])  # "owned buf" or "dp"
+                target = parts[fi + 1] if fi + 1 < len(parts) else parts[1]
+                if field.startswith("owned "):
+                    var = field.split(" ", 1)[1]
+                    observer._eval_query(QE(field="owned", agent=target, var=var))
+                else:
+                    observer._eval_query(QE(field=field, agent=target))
+            else:
+                # 自分自身のフィールドを直接表示
+                field = parts[2]
+                if field == "mood":
+                    ev.show(parts[1])
+                elif field in NEURO_FIELDS:
+                    val = observer.mood.state.get(field, 0.0)
+                    print(f"[query] {parts[1]}.{field} = {val:.3f}")
+                else:
+                    print(f"[query] 不明なフィールド: {field}")
+
+        elif cmd == "emit" and len(parts) >= 3:
+            # emit <from_agent> <event> [value]
+            val = " ".join(parts[3:]) if len(parts) > 3 else None
+            ev.emit(parts[1], parts[2], val)
+
+        elif cmd == "trust" and len(parts) == 4:
+            # trust <from_agent> <to_agent> <score>
+            ev.set_trust(parts[1], parts[2], float(parts[3]))
+
+        elif cmd == "spawn" and len(parts) >= 3:
+            ev.spawn(parts[1], parts[2], parts[3:] if len(parts) > 3 else [])
+
+        elif cmd == "threads":
+            ev.show_threads()
 
         elif cmd == "shii" and len(parts) >= 2:
             try:

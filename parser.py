@@ -1,10 +1,13 @@
 from lexer import Token, TT, Lexer
+import os
 from ast_nodes import (
     Program, AgentDecl, MoodDecl, NeuroStateNode, FnDecl, Param,
-    WhenBlock, AttractorDecl, AttractionStmt,
-    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState,
-    Literal, VarRef, BinOp, FnCallExpr, MsgSend,
-    LetStmt, OwnStmt, ReleaseStmt, RecvStmt,
+    WhenBlock, AttractorDecl, AttractionStmt, TrustDecl, CapabilityDecl, ContractDecl,
+    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel,
+    Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr, ChannelCreateExpr,
+    LetStmt, OwnStmt, ReleaseStmt, RecvStmt, SpawnStmt,
+    SendChStmt, RecvChStmt, CloseChStmt,
+    EmitStmt, OnEventBlock, MatchArm, MatchStmt,
     ReturnStmt, ExprStmt, BranchStmt, LoopStmt, BreakStmt,
 )
 
@@ -14,9 +17,12 @@ class ParseError(Exception):
 
 
 class Parser:
-    def __init__(self, tokens: list[Token]):
+    def __init__(self, tokens: list[Token], base_dir: str = None,
+                 _imported: set = None):
         self.tokens = [t for t in tokens if t.type != TT.NEWLINE]
         self.pos = 0
+        self.base_dir = base_dir or os.getcwd()
+        self._imported: set = _imported if _imported is not None else set()
 
     def peek(self) -> Token:
         return self.tokens[self.pos]
@@ -41,17 +47,49 @@ class Parser:
     def parse(self) -> Program:
         agents = []
         attractions = []
+        trusts = []
         while self.peek().type != TT.EOF:
             t = self.peek()
-            if t.type == TT.AGENT:
+            if t.type == TT.IMPORT:
+                imported = self._parse_import()
+                if imported:
+                    agents.extend(imported.agents)
+                    attractions.extend(imported.attractions)
+                    trusts.extend(imported.trusts or [])
+            elif t.type == TT.AGENT:
                 agents.append(self.parse_agent())
             elif (t.type == TT.IDENT
                   and self.pos + 1 < len(self.tokens)
                   and self.tokens[self.pos + 1].type == TT.ATTRACT):
                 attractions.append(self.parse_top_attraction())
+            elif (t.type == TT.IDENT
+                  and self.pos + 1 < len(self.tokens)
+                  and self.tokens[self.pos + 1].type == TT.TRUST):
+                trusts.append(self.parse_top_trust())
             else:
                 self.advance()
-        return Program(agents=agents, attractions=attractions)
+        return Program(agents=agents, attractions=attractions, trusts=trusts)
+
+    def _parse_import(self):
+        """import "path/to/file.nema" — ファイルを読み込んでマージ"""
+        from lexer import Lexer
+        self.advance()  # consume 'import'
+        path_tok = self.advance()
+        rel_path = path_tok.value  # STRING トークン（クォートなし）
+        full_path = os.path.normpath(os.path.join(self.base_dir, rel_path))
+        if full_path in self._imported:
+            return None  # 循環 import 防止
+        self._imported.add(full_path)
+        try:
+            with open(full_path) as f:
+                src = f.read()
+        except FileNotFoundError:
+            raise ParseError(f"import: ファイルが見つからない: {full_path!r}")
+        tokens = Lexer(src).tokenize()
+        sub_parser = Parser(tokens,
+                            base_dir=os.path.dirname(full_path),
+                            _imported=self._imported)
+        return sub_parser.parse()
 
     def parse_top_attraction(self):
         from ast_nodes import AttractionStmt
@@ -72,15 +110,27 @@ class Parser:
         fns = []
         whens = []
         attractors = []
+        on_events = []
+        trust = None
+        capability = None
+        contract = None
 
         while self.peek().type != TT.RBRACE:
             t = self.peek()
             if t.type == TT.MOOD:
                 mood = self.parse_mood()
-            elif t.type in (TT.FN, TT.REQUIRES, TT.AFTER, TT.ON_ERROR):
+            elif t.type in (TT.FN, TT.REQUIRES, TT.ENSURES, TT.AFTER, TT.ON_ERROR):
                 fns.append(self.parse_fn())
             elif t.type == TT.WHEN:
                 whens.append(self.parse_when_block())
+            elif t.type == TT.ON:
+                on_events.append(self.parse_on_event())
+            elif t.type == TT.TRUST:
+                trust = self.parse_trust_decl()
+            elif t.type == TT.CAPABILITY:
+                capability = self.parse_capability_decl()
+            elif t.type == TT.CONTRACT:
+                contract = self.parse_contract()
             elif t.type == TT.IDENT and t.value == "attractor":
                 attractors.append(self.parse_attractor())
             else:
@@ -88,7 +138,9 @@ class Parser:
 
         self.expect(TT.RBRACE)
         return AgentDecl(name=name, mood=mood, fns=fns,
-                         whens=whens, attractors=attractors)
+                         whens=whens, attractors=attractors,
+                         on_events=on_events, trust=trust,
+                         capability=capability, contract=contract)
 
     def parse_mood(self) -> MoodDecl:
         self.expect(TT.MOOD)
@@ -112,6 +164,8 @@ class Parser:
 
     def parse_fn(self) -> FnDecl:
         requires = None
+        ensures = None
+        on_error_body = None
 
         if self.peek().type == TT.REQUIRES:
             self.advance()
@@ -119,9 +173,19 @@ class Parser:
             requires = self.parse_condition()
             self.expect(TT.RPAREN)
 
-        while self.peek().type in (TT.AFTER, TT.ON_ERROR):
+        if self.peek().type == TT.ENSURES:
             self.advance()
-            if self.peek().type == TT.LPAREN:
+            self.expect(TT.LPAREN)
+            ensures = self.parse_condition()
+            self.expect(TT.RPAREN)
+
+        while self.peek().type in (TT.AFTER, TT.ON_ERROR):
+            deco = self.advance()
+            if deco.type == TT.ON_ERROR and self.peek().type == TT.LBRACE:
+                self.advance()
+                on_error_body = self.parse_body()
+                self.expect(TT.RBRACE)
+            elif self.peek().type == TT.LPAREN:
                 self.advance()
                 while self.peek().type != TT.RPAREN:
                     self.advance()
@@ -151,7 +215,8 @@ class Parser:
         self.expect(TT.RBRACE)
 
         return FnDecl(name=name, params=params, ret_type=ret_type,
-                      requires=requires, body=body)
+                      requires=requires, ensures=ensures, body=body,
+                      on_error_body=on_error_body)
 
     def parse_when_block(self) -> WhenBlock:
         self.expect(TT.WHEN)
@@ -203,6 +268,21 @@ class Parser:
         if t.type == TT.RECV:
             return self.parse_recv()
 
+        if t.type == TT.SEND:
+            return self.parse_send_ch()
+
+        if t.type == TT.CLOSE:
+            return self.parse_close_ch()
+
+        if t.type == TT.SYNC:
+            return self.parse_spawn()
+
+        if t.type == TT.EMIT:
+            return self.parse_emit()
+
+        if t.type == TT.MATCH:
+            return self.parse_match()
+
         if t.type == TT.RETURN:
             return self.parse_return()
 
@@ -252,12 +332,48 @@ class Parser:
         name = self.expect(TT.IDENT).value
         return ReleaseStmt(name=name)
 
-    def parse_recv(self) -> RecvStmt:
+    def parse_recv(self):
         self.expect(TT.RECV)
         name = self.expect(TT.IDENT).value
-        self.expect(TT.FROM)
-        from_agent = self.expect(TT.IDENT).value
-        return RecvStmt(name=name, from_agent=from_agent)
+        # recv ch -> val { body }  — チャンネル受信
+        if self.peek().type == TT.ARROW:
+            self.advance()  # consume '->'
+            var = self.expect(TT.IDENT).value
+            self.expect(TT.LBRACE)
+            body = self.parse_body()
+            self.expect(TT.RBRACE)
+            return RecvChStmt(channel=name, var=var, body=body)
+        if self.peek().type == TT.FROM:
+            self.advance()
+            from_agent = self.expect(TT.IDENT).value
+            return RecvStmt(name=name, from_agent=from_agent)
+        # from なし → mailbox からブロッキング受信
+        return RecvStmt(name=name, from_agent=None)
+
+    def parse_send_ch(self) -> SendChStmt:
+        """send <channel> <expr>"""
+        self.advance()  # consume 'send'
+        channel = self.expect(TT.IDENT).value
+        value = self.parse_expr()
+        return SendChStmt(channel=channel, value=value)
+
+    def parse_close_ch(self) -> CloseChStmt:
+        """close <channel>"""
+        self.advance()  # consume 'close'
+        channel = self.expect(TT.IDENT).value
+        return CloseChStmt(channel=channel)
+
+    def parse_spawn(self) -> SpawnStmt:
+        self.advance()  # sync → spawn として使う
+        fn_name = self.expect(TT.IDENT).value
+        args = []
+        if self.peek().type == TT.LPAREN:
+            self.advance()
+            while self.peek().type != TT.RPAREN:
+                args.append(self.parse_expr())
+                self.skip(TT.COMMA)
+            self.expect(TT.RPAREN)
+        return SpawnStmt(fn_name=fn_name, args=args)
 
     def parse_return(self) -> ReturnStmt:
         self.expect(TT.RETURN)
@@ -345,6 +461,16 @@ class Parser:
                 return FnCallExpr(name=name, args=args)
             return VarRef(name=name)
 
+        if t.type == TT.QUERY:
+            return self.parse_query_expr()
+
+        if t.type == TT.CHANNEL:
+            self.advance()  # consume 'channel'
+            self.expect(TT.LT)
+            elem_type = self.parse_type()
+            self.expect(TT.GT)
+            return ChannelCreateExpr(elem_type=elem_type)
+
         if t.type == TT.LPAREN:
             self.advance()
             expr = self.parse_expr()
@@ -353,6 +479,131 @@ class Parser:
 
         self.advance()
         return Literal(value=None)
+
+    def parse_match(self) -> MatchStmt:
+        """
+        match <expr> {
+          > 0.8 { ... }
+          >= 0.5 { ... }
+          == 0.3 { ... }
+          _     { ... }
+        }
+        """
+        self.advance()  # consume 'match'
+        subject = self.parse_expr()
+        self.expect(TT.LBRACE)
+        arms = []
+        while self.peek().type != TT.RBRACE:
+            t = self.peek()
+            # default arm: _
+            if t.type == TT.IDENT and t.value == "_":
+                self.advance()
+                self.expect(TT.LBRACE)
+                body = self.parse_body()
+                self.expect(TT.RBRACE)
+                arms.append(MatchArm(op=None, threshold=None, body=body))
+                break  # default は最後
+            # 条件 arm: op value { body }
+            op = self.advance().value   # > < >= <= ==
+            threshold = self.parse_expr()
+            self.expect(TT.LBRACE)
+            body = self.parse_body()
+            self.expect(TT.RBRACE)
+            arms.append(MatchArm(op=op, threshold=threshold, body=body))
+        self.expect(TT.RBRACE)
+        return MatchStmt(subject=subject, arms=arms)
+
+    def parse_contract(self) -> ContractDecl:
+        """
+        contract {
+          dp >= 0.0
+          dp <= 1.0
+          gaba >= 0.1
+        }
+        各行が独立した不変条件（parse_condition 形式）。
+        """
+        self.advance()  # consume 'contract'
+        self.expect(TT.LBRACE)
+        invariants = []
+        while self.peek().type != TT.RBRACE:
+            if self.peek().type == TT.EOF:
+                break
+            invariants.append(self.parse_condition())
+        self.expect(TT.RBRACE)
+        return ContractDecl(invariants=invariants)
+
+    def parse_capability_decl(self) -> "CapabilityDecl":
+        """capability: { alloc, free, write, read }"""
+        self.advance()  # consume 'capability'
+        self.expect(TT.COLON)
+        self.expect(TT.LBRACE)
+        caps = set()
+        while self.peek().type != TT.RBRACE:
+            caps.add(self.advance().value)
+            self.skip(TT.COMMA)
+        self.expect(TT.RBRACE)
+        return CapabilityDecl(caps=caps)
+
+    def parse_emit(self) -> EmitStmt:
+        """emit "event_name" [expr]"""
+        self.advance()  # consume 'emit'
+        event = self.advance().value  # STRING or IDENT
+        value = None
+        if self.peek().type not in (TT.RBRACE, TT.EOF, TT.NEWLINE):
+            value = self.parse_expr()
+        return EmitStmt(event=event, value=value)
+
+    def parse_on_event(self) -> OnEventBlock:
+        """on "event_name" { ... }"""
+        self.advance()  # consume 'on'
+        event = self.advance().value  # STRING or IDENT
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return OnEventBlock(event=event, body=body)
+
+    def parse_trust_decl(self) -> TrustDecl:
+        """trust: { AgentName: 0.8, ... }"""
+        self.advance()  # consume 'trust'
+        self.expect(TT.COLON)
+        self.expect(TT.LBRACE)
+        scores = {}
+        while self.peek().type != TT.RBRACE:
+            name = self.advance().value
+            self.expect(TT.COLON)
+            val = float(self.advance().value)
+            scores[name] = val
+            self.skip(TT.COMMA)
+        self.expect(TT.RBRACE)
+        return TrustDecl(scores=scores)
+
+    def parse_top_trust(self):
+        """AgentA trust AgentB 0.8  (トップレベル)"""
+        from ast_nodes import TrustStmt
+        a = self.advance().value   # IDENT
+        self.advance()             # trust
+        b = self.advance().value   # IDENT
+        score = 0.5
+        if self.peek().type in (TT.FLOAT, TT.INT):
+            score = float(self.advance().value)
+        return TrustStmt(agent_a=a, agent_b=b, score=score)
+
+    def parse_query_expr(self) -> QueryExpr:
+        """
+        query <field> from <Agent>
+        query owned <var> from <Agent>
+        query mood from <Agent>
+        """
+        self.advance()  # consume 'query'
+        # "owned <var>" か NeuroState フィールド名 or "mood"
+        field_tok = self.advance()
+        field = field_tok.value
+        var = None
+        if field == "owned":
+            var = self.advance().value   # 変数名
+        self.expect(TT.FROM)
+        agent = self.advance().value     # エージェント名
+        return QueryExpr(field=field, agent=agent, var=var)
 
     # ===== 型・条件パーサー =====
 
@@ -376,6 +627,12 @@ class Parser:
             return TypePtr(inner=inner)
         if t.type == TT.NEUROSTATE:
             self.advance(); return TypeNeuroState()
+        if t.type == TT.CHANNEL:
+            self.advance()
+            self.expect(TT.LT)
+            elem = self.parse_type()
+            self.expect(TT.GT)
+            return TypeChannel(elem=elem)
         self.advance()
         return None
 

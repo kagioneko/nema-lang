@@ -18,6 +18,15 @@ class TT(Enum):
     RELEASE = auto()
     QUERY = auto()
     FROM = auto()
+    EMIT = auto()
+    ON = auto()
+    TRUST = auto()
+    IMPORT = auto()
+    MATCH = auto()
+    CHANNEL = auto()
+    SEND = auto()
+    CLOSE = auto()
+    CONTRACT = auto()
     WHILE = auto()
     UNTIL = auto()
     SYNC = auto()
@@ -35,9 +44,11 @@ class TT(Enum):
     TYPE_VOID = auto()
     # デコレータ
     REQUIRES = auto()
+    ENSURES = auto()
     AFTER = auto()
     ON_ERROR = auto()
     CTX = auto()
+    CAPABILITY = auto()
     # リテラル
     IDENT = auto()
     FLOAT = auto()
@@ -87,9 +98,19 @@ KEYWORDS = {
     "release": TT.RELEASE,
     "query": TT.QUERY,
     "from": TT.FROM,
+    "emit": TT.EMIT,
+    "on": TT.ON,
+    "trust": TT.TRUST,
+    "import": TT.IMPORT,
+    "match": TT.MATCH,
+    "channel": TT.CHANNEL,
+    "send": TT.SEND,
+    "close": TT.CLOSE,
+    "contract": TT.CONTRACT,
     "while": TT.WHILE,
     "until": TT.UNTIL,
     "sync": TT.SYNC,
+    "spawn": TT.SYNC,
     "and": TT.AND,
     "or": TT.OR,
     "not": TT.NOT,
@@ -105,10 +126,13 @@ KEYWORDS = {
 
 DECORATORS = {
     "requires": TT.REQUIRES,
+    "ensures": TT.ENSURES,
     "after": TT.AFTER,
     "on_error": TT.ON_ERROR,
     "when": TT.WHEN,
 }
+
+KEYWORDS["capability"] = TT.CAPABILITY
 
 
 @dataclass

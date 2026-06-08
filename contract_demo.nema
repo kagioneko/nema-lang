@@ -1,0 +1,34 @@
+// contract デモ — 不変条件によるエージェント安全保証
+
+agent SafeKernel {
+  mood: NeuroState = {
+    dp: 0.8, s: 0.7, ac: 0.9,
+    ox: 0.6, gaba: 0.5, e: 0.7
+  }
+
+  contract {
+    dp >= 0.1
+    gaba >= 0.1
+    ac >= 0.2
+  }
+
+  attractor flow {
+    dp: 0.7, ac: 0.9, e: 0.8,
+    s: 0.6, gaba: 0.6, ox: 0.5
+  }
+
+  @requires(ac > 0.5)
+  fn process() {
+    let result = work()
+  }
+
+  fn work() {
+    let x = 42
+    return x
+  }
+
+  // 意図的に dp を壊して contract 違反を起こす
+  fn corrupt() {
+    let x = 0
+  }
+}

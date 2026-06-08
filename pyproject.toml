@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nema-lang"
-version = "0.1.0"
-description = "Agent-oriented programming language where emotion is a first-class citizen"
+version = "0.3.1"
+description = "Experimental agent-oriented language for compiling NeuroState into control flow"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"

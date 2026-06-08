@@ -31,7 +31,11 @@ class TypePtr:
 class TypeNeuroState:
     pass
 
-NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState
+@dataclass
+class TypeChannel:
+    elem: object  # NemaType — channel<i64> の i64 部分
+
+NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState | TypeChannel
 
 
 def type_str(t) -> str:
@@ -42,6 +46,7 @@ def type_str(t) -> str:
     if isinstance(t, TypeVoid): return "void"
     if isinstance(t, TypePtr): return f"ptr<{type_str(t.inner)}>"
     if isinstance(t, TypeNeuroState): return "NeuroState"
+    if isinstance(t, TypeChannel): return f"channel<{type_str(t.elem)}>"
     return "unknown"
 
 
@@ -71,6 +76,16 @@ class MsgSend:
     receiver: str   # エージェント名
     message: object # Expr
 
+@dataclass
+class QueryExpr:
+    field: str      # NeuroState フィールド名 ("dp"/"s"/... or "mood" or "owned")
+    agent: str      # 対象エージェント名
+    var: str | None = None  # "owned <var>" のとき変数名
+
+@dataclass
+class ChannelCreateExpr:
+    elem_type: object  # NemaType
+
 
 # ===== 文ノード =====
 
@@ -90,8 +105,13 @@ class ReleaseStmt:
 
 @dataclass
 class RecvStmt:
-    name: str       # 受け取る変数名
-    from_agent: str # 送り元エージェント名
+    name: str              # 受け取る変数名
+    from_agent: str | None # None = mailbox から受信（blocking）
+
+@dataclass
+class SpawnStmt:
+    fn_name: str   # バックグラウンドで実行する関数名
+    args: list     # 引数リスト
 
 @dataclass
 class ReturnStmt:
@@ -117,6 +137,42 @@ class LoopStmt:
 class BreakStmt:
     pass
 
+@dataclass
+class SendChStmt:
+    channel: str   # チャンネル変数名
+    value: object  # Expr
+
+@dataclass
+class RecvChStmt:
+    channel: str   # チャンネル変数名
+    var: str       # 受け取る値のバインド名
+    body: list     # 受信後に実行するボディ
+
+@dataclass
+class CloseChStmt:
+    channel: str   # チャンネル変数名
+
+@dataclass
+class EmitStmt:
+    event: str      # イベント名（文字列）
+    value: object   # Expr — ペイロード（None 可）
+
+@dataclass
+class OnEventBlock:
+    event: str      # 受信するイベント名
+    body: list      # 実行する文のリスト
+
+@dataclass
+class MatchArm:
+    op: str | None      # ">", "<", ">=", "<=", "==" or None（default _）
+    threshold: object   # Expr — 比較値、None は default arm
+    body: list          # 実行する文のリスト
+
+@dataclass
+class MatchStmt:
+    subject: object     # Expr — match する値（VarRef "dp" など）
+    arms: list          # list[MatchArm]
+
 
 # ===== エージェント宣言ノード =====
 
@@ -139,7 +195,9 @@ class FnDecl:
     params: list
     ret_type: NemaType | None
     requires: list | None
-    body: list  # list of statement nodes
+    body: list                  # list of statement nodes
+    on_error_body: list = None  # @on_error { ... } があれば実行される
+    ensures: list = None        # @ensures(dp > 0.5) — 事後条件
 
 @dataclass
 class WhenBlock:
@@ -152,12 +210,28 @@ class AttractorDecl:
     values: dict[str, float]
 
 @dataclass
+class TrustDecl:
+    scores: dict[str, float]   # { AgentName: 0.8, ... }
+
+@dataclass
+class CapabilityDecl:
+    caps: set   # {"alloc", "free", "emit", ...}
+
+@dataclass
+class ContractDecl:
+    invariants: list  # list[list[list[tuple]]] — 各不変条件（parse_condition形式）
+
+@dataclass
 class AgentDecl:
     name: str
     mood: MoodDecl | None
     fns: list
     whens: list        # list[WhenBlock]
     attractors: list   # list[AttractorDecl]
+    on_events: list = None       # list[OnEventBlock]
+    trust: TrustDecl | None = None
+    capability: CapabilityDecl | None = None
+    contract: "ContractDecl | None" = None
 
 @dataclass
 class AttractionStmt:
@@ -166,6 +240,13 @@ class AttractionStmt:
     strength: float = 0.3
 
 @dataclass
+class TrustStmt:
+    agent_a: str   # a が b を信頼する（一方向）
+    agent_b: str
+    score: float = 0.5
+
+@dataclass
 class Program:
     agents: list
     attractions: list   # list[AttractionStmt]
+    trusts: list = None  # list[TrustStmt]

@@ -1,0 +1,39 @@
+// channel<T> デモ — 型付きチャンネルによる Producer/Consumer パターン
+// done チャンネルで完了を待ち合わせる
+
+agent Pipeline {
+  mood: NeuroState = {
+    dp: 0.8, s: 0.7, ac: 0.9,
+    ox: 0.6, gaba: 0.5, e: 0.7
+  }
+
+  attractor flow {
+    dp: 0.7, ac: 0.9, e: 0.8,
+    s: 0.6, gaba: 0.6, ox: 0.5
+  }
+
+  // consumer をバックグラウンドに立て、channel にデータを流す
+  @requires(ac > 0.7)
+  fn run() {
+    let ch   = channel<i64>
+    let done = channel<i64>
+    spawn consumer(ch, done)
+    send ch 10
+    send ch 20
+    send ch 30
+    close ch
+    recv done -> r {
+      log(r)
+    }
+  }
+
+  // channel から値を受け取るループ（close されたら自動的に抜ける）
+  fn consumer(ch: channel<i64>, done: channel<i64>) {
+    loop {
+      recv ch -> val {
+        log(val)
+      }
+    }
+    send done 99
+  }
+}
