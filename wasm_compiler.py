@@ -17,12 +17,19 @@ Nema → WAT (WASM Text Format) コンパイラ
 
 from ast_nodes import (
     Program, AgentDecl, FnDecl, Param,
-    LetStmt, ReturnStmt, ExprStmt, BranchStmt,
+    LetStmt, ReturnStmt, ExprStmt, BranchStmt, ForStmt, SetMoodStmt,
     Literal, VarRef, BinOp, FnCallExpr,
+    RangeExpr, ListExpr,
     TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr,
 )
 
 NEURO_FIELDS = ["dp", "s", "ac", "ox", "gaba", "e"]
+
+# WASMコンパイル非対応のインタープリタ専用組み込み関数
+_INTERP_ONLY = {
+    "log", "print", "alloc", "write", "read", "free", "size",
+    "introspect", "summarize", "empathize", "rand_mood",
+}
 
 F64_OPS = {
     "+":  "f64.add",
@@ -153,23 +160,30 @@ class WasmCompiler:
     # ──────────────────────────────────────────
 
     def _gate(self, requires: list, ret: str) -> list[str]:
+        """@requires → early-exit ゲート（OR グループ完全対応）
+        requires = [[AND条件...], [AND条件...], ...]  外側=OR / 内側=AND
+        いずれかの AND グループが全て真なら通過。全グループ失敗で -1 return。
+        """
         out = []
-        group = requires[0]  # 最初の AND グループ
 
-        # 条件をスタックに積む
-        for i, (field, op, val) in enumerate(group):
-            if field in NEURO_FIELDS:
-                out.append(self._i(f"(global.get ${self._pfx}_{field})"))
-            elif field in self._locals:
-                out.append(self._i(f"(local.get ${field})"))
-            else:
-                out.append(self._i(f"(f64.const 0.0)  ;; unknown: {field}"))
-            out.append(self._i(f"(f64.const {float(val)})"))
-            out.append(self._i(f"({F64_OPS.get(op, 'f64.gt')})"))
-            if i > 0:
-                out.append(self._i("(i32.and)"))
+        for gi, group in enumerate(requires):
+            # AND グループ内の各条件
+            for i, (field, op, val) in enumerate(group):
+                if field in NEURO_FIELDS:
+                    out.append(self._i(f"(global.get ${self._pfx}_{field})"))
+                elif field in self._locals:
+                    out.append(self._i(f"(local.get ${field})"))
+                else:
+                    out.append(self._i(f"(f64.const 0.0)  ;; unknown: {field}"))
+                out.append(self._i(f"(f64.const {float(val)})"))
+                out.append(self._i(f"({F64_OPS.get(op, 'f64.gt')})"))
+                if i > 0:
+                    out.append(self._i("(i32.and)"))  # AND 結合
+            # 複数グループは OR で結合
+            if gi > 0:
+                out.append(self._i("(i32.or)"))
 
-        # 条件が偽（ゲート失敗）なら early return -1
+        # 全グループの OR 結果が偽なら early return -1
         fail = "(i64.const -1)" if ret == "i64" else "(f64.const -1.0)"
         out.append(self._i("(i32.eqz)  ;; 失敗 = 1 に変換"))
         out.append(self._i("(if"))
@@ -218,6 +232,12 @@ class WasmCompiler:
 
         elif isinstance(s, BranchStmt):
             out += self._branch(s, ret)
+
+        elif isinstance(s, ForStmt):
+            out += self._for_stmt(s, ret)
+
+        elif isinstance(s, SetMoodStmt):
+            out += self._set_mood(s)
 
         return out
 
@@ -297,9 +317,16 @@ class WasmCompiler:
             out.append(self._i(f"({op_wat})"))
 
         elif isinstance(e, FnCallExpr):
-            for arg in e.args:
-                out += self._expr(arg, self._type_of(arg))
-            out.append(self._i(f"(call ${self._pfx}_{e.name})"))
+            if e.name in _INTERP_ONLY:
+                # インタープリタ専用関数: 引数を評価して捨て、0.0 を戻す
+                for arg in e.args:
+                    out += self._expr(arg, self._type_of(arg))
+                    out.append(self._i("(drop)"))
+                out.append(self._i(f"(f64.const 0.0)  ;; interp-only: {e.name}"))
+            else:
+                for arg in e.args:
+                    out += self._expr(arg, self._type_of(arg))
+                out.append(self._i(f"(call ${self._pfx}_{e.name})"))
 
         return out
 
@@ -325,6 +352,28 @@ class WasmCompiler:
     # ユーティリティ
     # ──────────────────────────────────────────
 
+    def _set_mood(self, s: SetMoodStmt) -> list[str]:
+        """set field op val → WASM global.set（clamp 0.0–1.0）"""
+        out = []
+        g = f"${self._pfx}_{s.field}"
+        if s.op == "=":
+            out += self._expr(s.value, "f64")
+        elif s.op == "+=":
+            out.append(self._i(f"(global.get {g})"))
+            out += self._expr(s.value, "f64")
+            out.append(self._i("(f64.add)"))
+        elif s.op == "-=":
+            out.append(self._i(f"(global.get {g})"))
+            out += self._expr(s.value, "f64")
+            out.append(self._i("(f64.sub)"))
+        # clamp to [0.0, 1.0]
+        out.append(self._i("(f64.const 0.0)"))
+        out.append(self._i("(f64.max)"))
+        out.append(self._i("(f64.const 1.0)"))
+        out.append(self._i("(f64.min)"))
+        out.append(self._i(f"(global.set {g})"))
+        return out
+
     def _collect_locals(self, body: list) -> dict[str, str]:
         res = {}
         for s in body:
@@ -333,7 +382,62 @@ class WasmCompiler:
             elif isinstance(s, BranchStmt):
                 res.update(self._collect_locals(s.then_body))
                 res.update(self._collect_locals(s.else_body))
+            elif isinstance(s, ForStmt):
+                wt = "i64" if isinstance(s.iter, RangeExpr) else (
+                    self._type_of(s.iter.elems[0]) if isinstance(s.iter, ListExpr) and s.iter.elems else "f64"
+                )
+                res[s.var] = wt
+                res.update(self._collect_locals(s.body))
         return res
+
+    def _for_stmt(self, s: ForStmt, ret: str) -> list[str]:
+        out = []
+        label = s.var  # ループラベルに変数名を流用
+
+        if isinstance(s.iter, RangeExpr):
+            # --- 範囲ループ: block/loop/br_if パターン ---
+            wt = "i64"
+            # loop var の初期値をセット
+            out += self._expr(s.iter.start, wt)
+            out.append(self._i(f"(local.set ${label})"))
+
+            out.append(self._i(f"(block $break_{label}"))
+            self._depth += 1
+            out.append(self._i(f"(loop $loop_{label}"))
+            self._depth += 1
+
+            # 条件チェック: var >= end なら break へ
+            out.append(self._i(f"(local.get ${label})"))
+            out += self._expr(s.iter.end, wt)
+            out.append(self._i("(i64.ge_s)"))
+            out.append(self._i(f"(br_if $break_{label})"))
+
+            # ボディ
+            out += self._body(s.body, ret)
+
+            # var += 1
+            out.append(self._i(f"(local.get ${label})"))
+            out.append(self._i("(i64.const 1)"))
+            out.append(self._i("(i64.add)"))
+            out.append(self._i(f"(local.set ${label})"))
+
+            # ループ先頭へ
+            out.append(self._i(f"(br $loop_{label})"))
+
+            self._depth -= 1
+            out.append(self._i(")"))  # close loop
+            self._depth -= 1
+            out.append(self._i(")"))  # close block
+
+        elif isinstance(s.iter, ListExpr):
+            # --- リスト: 静的アンロール ---
+            wt = self._type_of(s.iter.elems[0]) if s.iter.elems else "f64"
+            for elem in s.iter.elems:
+                out += self._expr(elem, wt)
+                out.append(self._i(f"(local.set ${label})"))
+                out += self._body(s.body, ret)
+
+        return out
 
     def _has_return(self, body: list) -> bool:
         return any(isinstance(s, ReturnStmt) for s in body)

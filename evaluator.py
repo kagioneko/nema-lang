@@ -7,9 +7,10 @@ from ast_nodes import (Program, AgentDecl, NeuroStateNode,
                        SendChStmt, RecvChStmt, CloseChStmt,
                        EmitStmt, OnEventBlock, MatchStmt, MatchArm,
                        ReturnStmt, ExprStmt, BranchStmt,
-                       LoopStmt, BreakStmt, WhenBlock, AttractorDecl,
+                       LoopStmt, BreakStmt, WhenBlock, AttractorDecl, ForStmt,
                        Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr,
-                       ChannelCreateExpr)
+                       ChannelCreateExpr, RangeExpr, ListExpr, OkExpr, ErrExpr,
+                       SetMoodStmt)
 
 TRUST_DEFAULT  = 0.5   # 未定義エージェントに対するデフォルト信頼度
 TRUST_GATE     = 0.3   # これを下回ると query/send がブロックされる
@@ -117,6 +118,21 @@ class _ReturnSignal(Exception):
 
 class _BreakSignal(Exception):
     pass
+
+
+class NemaOk:
+    """Result型の成功値"""
+    def __init__(self, value):
+        self.value = value
+    def __repr__(self):
+        return f"ok({self.value!r})"
+
+class NemaErr:
+    """Result型のエラー値"""
+    def __init__(self, message):
+        self.message = message
+    def __repr__(self):
+        return f"err({self.message!r})"
 
 
 class NeuroState:
@@ -468,9 +484,12 @@ class Agent:
 
         if isinstance(stmt, BranchStmt):
             if self.mood.check(stmt.condition):
-                return self._exec_body(stmt.then_body, env)
+                result = self._exec_body(stmt.then_body, env)
             else:
-                return self._exec_body(stmt.else_body, env)
+                result = self._exec_body(stmt.else_body, env)
+            if result is not None:
+                raise _ReturnSignal(result)
+            return None
 
         if isinstance(stmt, LoopStmt):
             for _ in range(MAX_LOOP_ITER):
@@ -496,13 +515,62 @@ class Agent:
             for arm in stmt.arms:
                 if arm.op is None:  # default _
                     return self._exec_body(arm.body, env)
+                # Result アーム: ok(v) / err(msg)
+                if arm.op == "ok" and isinstance(subj, NemaOk):
+                    child = dict(env)
+                    child[arm.bind] = subj.value
+                    result = self._exec_body(arm.body, child)
+                    if result is not None:
+                        raise _ReturnSignal(result)
+                    return None
+                if arm.op == "err" and isinstance(subj, NemaErr):
+                    child = dict(env)
+                    child[arm.bind] = subj.message
+                    result = self._exec_body(arm.body, child)
+                    if result is not None:
+                        raise _ReturnSignal(result)
+                    return None
+                if arm.op in ("ok", "err"):
+                    continue
                 thresh = self._eval_expr(arm.threshold, env)
                 try:
                     matched = ops[arm.op](float(subj), float(thresh))
                 except (TypeError, ValueError):
                     matched = False
                 if matched:
-                    return self._exec_body(arm.body, env)
+                    result = self._exec_body(arm.body, env)
+                    if result is not None:
+                        raise _ReturnSignal(result)
+                    return None
+            return None
+
+        if isinstance(stmt, ForStmt):
+            iterable = self._eval_expr(stmt.iter, env)
+            if isinstance(iterable, (range, list)):
+                for val in iterable:
+                    env[stmt.var] = val
+                    try:
+                        result = self._exec_body(stmt.body, env)
+                        if result is not None:
+                            raise _ReturnSignal(result)
+                    except _BreakSignal:
+                        break
+            return None
+
+        if isinstance(stmt, SetMoodStmt):
+            field = stmt.field
+            if field not in NEURO_FIELDS:
+                print(f"  [set ERROR] {self.name}: '{field}' はNeuroStateフィールドではない")
+                return None
+            val = float(self._eval_expr(stmt.value, env) or 0.0)
+            with self.mood_lock:
+                if stmt.op == "=":
+                    self.mood.state[field] = max(0.0, min(1.0, val))
+                elif stmt.op == "+=":
+                    self.mood.state[field] = max(0.0, min(1.0, self.mood.state[field] + val))
+                elif stmt.op == "-=":
+                    self.mood.state[field] = max(0.0, min(1.0, self.mood.state[field] - val))
+            print(f"  [set] {self.name}.{field} {stmt.op} {val:.3f} → {self.mood.state[field]:.3f}")
             return None
 
         if isinstance(stmt, SendChStmt):
@@ -606,6 +674,20 @@ class Agent:
             ch = NemaChannel(elem_type=expr.elem_type)
             print(f"  [channel] {self.name}: {ch} を作成")
             return ch
+
+        if isinstance(expr, RangeExpr):
+            start = int(self._eval_expr(expr.start, env))
+            end   = int(self._eval_expr(expr.end, env))
+            return range(start, end)
+
+        if isinstance(expr, ListExpr):
+            return [self._eval_expr(e, env) for e in expr.elems]
+
+        if isinstance(expr, OkExpr):
+            return NemaOk(self._eval_expr(expr.value, env))
+
+        if isinstance(expr, ErrExpr):
+            return NemaErr(self._eval_expr(expr.message, env))
 
         return None
 

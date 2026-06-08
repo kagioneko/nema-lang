@@ -1,0 +1,39 @@
+agent Emilia {
+  mood: NeuroState = {
+    dp: 0.8, s: 0.6, ac: 0.7,
+    ox: 0.5, gaba: 0.4, e: 0.6
+  }
+
+  // OR条件ゲート: dp > 0.9 OR ox > 0.8
+  @requires(dp > 0.9 or ox > 0.8)
+  fn deep_connect() -> f64 {
+    let score = ox + s
+    return score
+  }
+
+  // for ループ
+  fn sum_fields() -> f64 {
+    let total = 0.0
+    for i in 0..3 {
+      set dp += 0.01
+    }
+    return dp
+  }
+
+  // set: NeuroState書き込み
+  @requires(dp > 0.6)
+  fn boost_mood() -> f64 {
+    set ac += 0.1
+    set ox += 0.05
+    return ac
+  }
+
+  // list ループ
+  fn weighted_sum() -> f64 {
+    let w = 0.0
+    for v in [0.1, 0.2, 0.3] {
+      set dp += v
+    }
+    return dp
+  }
+}

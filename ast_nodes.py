@@ -35,7 +35,15 @@ class TypeNeuroState:
 class TypeChannel:
     elem: object  # NemaType — channel<i64> の i64 部分
 
-NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState | TypeChannel
+@dataclass
+class TypeList:
+    elem: object  # NemaType — list<i64> の i64 部分
+
+@dataclass
+class TypeResult:
+    ok: object  # NemaType — Result<T> の T
+
+NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState | TypeChannel | TypeList | TypeResult
 
 
 def type_str(t) -> str:
@@ -47,6 +55,8 @@ def type_str(t) -> str:
     if isinstance(t, TypePtr): return f"ptr<{type_str(t.inner)}>"
     if isinstance(t, TypeNeuroState): return "NeuroState"
     if isinstance(t, TypeChannel): return f"channel<{type_str(t.elem)}>"
+    if isinstance(t, TypeList): return f"list<{type_str(t.elem)}>"
+    if isinstance(t, TypeResult): return f"Result<{type_str(t.ok)}>"
     return "unknown"
 
 
@@ -85,6 +95,23 @@ class QueryExpr:
 @dataclass
 class ChannelCreateExpr:
     elem_type: object  # NemaType
+
+@dataclass
+class RangeExpr:
+    start: object  # Expr
+    end: object    # Expr
+
+@dataclass
+class ListExpr:
+    elems: list    # list[Expr]
+
+@dataclass
+class OkExpr:
+    value: object  # Expr
+
+@dataclass
+class ErrExpr:
+    message: object  # Expr (string literal or VarRef)
 
 
 # ===== 文ノード =====
@@ -167,11 +194,24 @@ class MatchArm:
     op: str | None      # ">", "<", ">=", "<=", "==" or None（default _）
     threshold: object   # Expr — 比較値、None は default arm
     body: list          # 実行する文のリスト
+    bind: str | None = None   # ok(v)/err(msg) のバインド変数名
 
 @dataclass
 class MatchStmt:
     subject: object     # Expr — match する値（VarRef "dp" など）
     arms: list          # list[MatchArm]
+
+@dataclass
+class ForStmt:
+    var: str           # ループ変数名
+    iter: object       # RangeExpr | ListExpr | VarRef
+    body: list         # 実行する文のリスト
+
+@dataclass
+class SetMoodStmt:
+    field: str   # NeuroState フィールド名 ("dp"/"s"/...)
+    op: str      # "=" / "+=" / "-="
+    value: object  # Expr
 
 
 # ===== エージェント宣言ノード =====

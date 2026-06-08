@@ -3,12 +3,13 @@ import os
 from ast_nodes import (
     Program, AgentDecl, MoodDecl, NeuroStateNode, FnDecl, Param,
     WhenBlock, AttractorDecl, AttractionStmt, TrustDecl, CapabilityDecl, ContractDecl,
-    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel,
+    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel, TypeList, TypeResult,
     Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr, ChannelCreateExpr,
+    RangeExpr, ListExpr, OkExpr, ErrExpr,
     LetStmt, OwnStmt, ReleaseStmt, RecvStmt, SpawnStmt,
     SendChStmt, RecvChStmt, CloseChStmt,
     EmitStmt, OnEventBlock, MatchArm, MatchStmt,
-    ReturnStmt, ExprStmt, BranchStmt, LoopStmt, BreakStmt,
+    ReturnStmt, ExprStmt, BranchStmt, LoopStmt, BreakStmt, ForStmt, SetMoodStmt,
 )
 
 
@@ -292,6 +293,12 @@ class Parser:
         if t.type == TT.LOOP:
             return self.parse_loop()
 
+        if t.type == TT.FOR:
+            return self.parse_for()
+
+        if t.type == TT.SET:
+            return self.parse_set_mood()
+
         if t.type == TT.WHILE:
             return self.parse_while()
 
@@ -477,6 +484,23 @@ class Parser:
             self.expect(TT.RPAREN)
             return expr
 
+        if t.type == TT.LBRACKET:
+            return self._parse_list_literal()
+
+        if t.type == TT.OK:
+            self.advance()
+            self.expect(TT.LPAREN)
+            val = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return OkExpr(value=val)
+
+        if t.type == TT.ERR:
+            self.advance()
+            self.expect(TT.LPAREN)
+            msg = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ErrExpr(message=msg)
+
         self.advance()
         return Literal(value=None)
 
@@ -503,6 +527,17 @@ class Parser:
                 self.expect(TT.RBRACE)
                 arms.append(MatchArm(op=None, threshold=None, body=body))
                 break  # default は最後
+            # Result arm: ok(v) { body } or err(msg) { body }
+            if t.type in (TT.OK, TT.ERR):
+                kind = self.advance().value   # "ok" or "err"
+                self.expect(TT.LPAREN)
+                bind_var = self.expect(TT.IDENT).value
+                self.expect(TT.RPAREN)
+                self.expect(TT.LBRACE)
+                body = self.parse_body()
+                self.expect(TT.RBRACE)
+                arms.append(MatchArm(op=kind, threshold=None, body=body, bind=bind_var))
+                continue
             # 条件 arm: op value { body }
             op = self.advance().value   # > < >= <= ==
             threshold = self.parse_expr()
@@ -512,6 +547,65 @@ class Parser:
             arms.append(MatchArm(op=op, threshold=threshold, body=body))
         self.expect(TT.RBRACE)
         return MatchStmt(subject=subject, arms=arms)
+
+    def parse_set_mood(self) -> SetMoodStmt:
+        """set <field> <op> <expr>
+        例: set dp = 0.9
+            set dp += 0.1
+            set s -= 0.05
+        """
+        self.advance()  # consume 'set'
+        field = self.expect(TT.IDENT).value
+        t = self.peek()
+        if t.type == TT.PLUS_ASSIGN:
+            self.advance(); op = "+="
+        elif t.type == TT.MINUS_ASSIGN:
+            self.advance(); op = "-="
+        elif t.type == TT.ASSIGN:
+            self.advance(); op = "="
+        else:
+            op = "="
+        value = self.parse_expr()
+        return SetMoodStmt(field=field, op=op, value=value)
+
+    def parse_for(self) -> ForStmt:
+        """for <var> in <iter> { <body> }
+        <iter> := <expr>..<expr>  (RangeExpr)
+               | [e1, e2, ...]    (ListExpr)
+               | <expr>           (VarRef など)
+        """
+        self.advance()  # consume 'for'
+        var = self.expect(TT.IDENT).value
+        self.expect(TT.IN)
+        iter_expr = self._parse_for_iter()
+        self.expect(TT.LBRACE)
+        body = self.parse_body()
+        self.expect(TT.RBRACE)
+        return ForStmt(var=var, iter=iter_expr, body=body)
+
+    def _parse_for_iter(self):
+        """forループのイテラブル部分をパースする"""
+        if self.peek().type == TT.LBRACKET:
+            return self._parse_list_literal()
+        expr = self.parse_primary()
+        if self.peek().type == TT.DOTDOT:
+            self.advance()  # consume '..'
+            end = self.parse_primary()
+            return RangeExpr(start=expr, end=end)
+        return expr
+
+    def _parse_list_literal(self) -> ListExpr:
+        """[e1, e2, e3, ...]"""
+        self.advance()  # consume '['
+        elems = []
+        while self.peek().type != TT.RBRACKET:
+            if self.peek().type == TT.EOF:
+                break
+            elems.append(self.parse_expr())
+            if self.peek().type == TT.COMMA:
+                self.advance()
+        self.expect(TT.RBRACKET)
+        return ListExpr(elems=elems)
 
     def parse_contract(self) -> ContractDecl:
         """
@@ -633,6 +727,12 @@ class Parser:
             elem = self.parse_type()
             self.expect(TT.GT)
             return TypeChannel(elem=elem)
+        if t.type == TT.IDENT and t.value == "Result":
+            self.advance()
+            self.expect(TT.LT)
+            inner = self.parse_type()
+            self.expect(TT.GT)
+            return TypeResult(ok=inner)
         self.advance()
         return None
 

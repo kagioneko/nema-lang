@@ -30,6 +30,11 @@ class TT(Enum):
     WHILE = auto()
     UNTIL = auto()
     SYNC = auto()
+    FOR = auto()
+    IN = auto()
+    OK = auto()
+    ERR = auto()
+    SET = auto()
     AND = auto()
     OR = auto()
     NOT = auto()
@@ -69,6 +74,11 @@ class TT(Enum):
     PLUS_ASSIGN = auto() # +=
     MINUS_ASSIGN = auto() # -=
     DOT = auto()        # .
+    DOTDOT = auto()     # ..
+    LBRACKET = auto()   # [
+    RBRACKET = auto()   # ]
+    STAR = auto()       # *
+    SLASH = auto()      # /
     COLON = auto()      # :
     COMMA = auto()      # ,
     AT = auto()         # @
@@ -111,6 +121,11 @@ KEYWORDS = {
     "until": TT.UNTIL,
     "sync": TT.SYNC,
     "spawn": TT.SYNC,
+    "for": TT.FOR,
+    "in": TT.IN,
+    "ok": TT.OK,
+    "err": TT.ERR,
+    "set": TT.SET,
     "and": TT.AND,
     "or": TT.OR,
     "not": TT.NOT,
@@ -187,8 +202,14 @@ class Lexer:
     def read_number(self) -> Token:
         line = self.line
         buf = ""
-        while self.pos < len(self.src) and (self.peek().isdigit() or self.peek() == "."):
-            buf += self.advance()
+        while self.pos < len(self.src):
+            ch = self.peek()
+            if ch.isdigit():
+                buf += self.advance()
+            elif ch == "." and self.peek(1) != ".":
+                buf += self.advance()
+            else:
+                break
         tt = TT.FLOAT if "." in buf else TT.INT
         return Token(tt, buf, line)
 
@@ -298,7 +319,20 @@ class Lexer:
             elif ch == ",":
                 self.advance(); tokens.append(Token(TT.COMMA, ",", line))
             elif ch == ".":
-                self.advance(); tokens.append(Token(TT.DOT, ".", line))
+                self.advance()
+                if self.peek() == ".":
+                    self.advance()
+                    tokens.append(Token(TT.DOTDOT, "..", line))
+                else:
+                    tokens.append(Token(TT.DOT, ".", line))
+            elif ch == "[":
+                self.advance(); tokens.append(Token(TT.LBRACKET, "[", line))
+            elif ch == "]":
+                self.advance(); tokens.append(Token(TT.RBRACKET, "]", line))
+            elif ch == "*":
+                self.advance(); tokens.append(Token(TT.STAR, "*", line))
+            elif ch == "/":
+                self.advance(); tokens.append(Token(TT.SLASH, "/", line))
             else:
                 raise LexerError(f"line {line}: unexpected char {ch!r}")
 
