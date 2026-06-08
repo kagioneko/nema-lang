@@ -7,6 +7,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/nema-lang)](https://pypi.org/project/nema-lang/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-WebAssembly-7c6ff7)](https://kagioneko.github.io/nema-lang/)
 
 ![Nema REPL demo](demo.gif)
 
