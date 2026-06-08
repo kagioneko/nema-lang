@@ -10,7 +10,7 @@ from typechecker import typecheck, report
 from compiler import compile_program
 
 DECAY_INTERVAL = 5.0
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 HELP_TEXT = """
 Nema Language Interpreter v0.1.0
