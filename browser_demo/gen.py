@@ -295,7 +295,7 @@ def generate_html(wasm_b64: str) -> str:
   <p>NeuroState-gated agents compiled from <code style="color:var(--accent)">.nema</code> source and running natively in your browser</p>
   <div class="badges">
     <span class="badge badge-wasm">WebAssembly</span>
-    <span class="badge badge-ver">nema-lang v0.3.1</span>
+    <span class="badge badge-ver">nema-lang v0.3.2</span>
     <span class="badge badge-oss">MIT License</span>
   </div>
 </header>
