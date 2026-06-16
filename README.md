@@ -211,6 +211,59 @@ Compiles to `(B[f] - A[f]) * strength * 0.1` delta applied symmetrically via LLV
 Working memory (RAM, max 5 entries) + long-term storage (JSON).  
 When `gaba ≥ 0.7`, composure triggers automatic memory consolidation (swap to disk).
 
+### For Loops
+```nema
+for i in 0..5 { log(i) }             // range loop
+for val in [1.0, 2.0, 3.0] { log(val) } // list loop
+
+@requires(dp > 0.5)
+fn gated_loop() -> f64 {
+  for i in 0..3 { log(i) }  // gate rejects entire loop if dp ≤ 0.5
+  return dp
+}
+```
+
+### Result\<T\> Error Type
+```nema
+fn divide(a: f64, b: f64) -> f64 {
+  branch b == 0.0 {
+    let r = err("divide by zero")
+    log(r)
+    return 0.0
+  } else {
+    let r = ok(a)
+    log(r)
+    return a
+  }
+}
+
+fn try_it() -> f64 {
+  let result = ok(42.0)
+  match result {
+    ok(v)    { return v }
+    err(msg) { log(msg); return 0.0 }
+  }
+  return 0.0
+}
+```
+
+### Typed Channels
+```nema
+let ch = channel<i64>
+spawn worker(ch)
+send ch 42
+recv ch -> val { log(val) }
+close ch
+```
+
+### Contracts (Layer 9)
+```nema
+agent Counter {
+  contract { dp >= 0.1  gaba >= 0.1 }  // checked after every call/tick
+}
+```
+Violations raise a `ContractError` and are logged with the offending field.
+
 ### JIT Performance
 
 | Operation | Speedup over interpreter |
@@ -293,6 +346,7 @@ Layer 5: Ownership          own / release / recv — double-free raises serotoni
 Layer 6: Capability         capability: { alloc, emit } — privileged ops (alloc/free) require declaration
 Layer 7: Trust Score        trust: { AgentB: 0.8 } — query/send blocked if trust < 0.3
 Layer 8: Memory Isolation   CPOS working memory (max 5) / long-term JSON / auto-swap
+Layer 9: Contract           contract { dp >= 0.1 } — invariant checked after every call/tick
 ```
 
 **Emotion gates express agent readiness, not permissions.**
@@ -323,6 +377,10 @@ agent Kernel {
 | `memory.nema` | CPOS working / long-term memory, `gaba`-triggered swap |
 | `kernel.nema` | Emotion-gated `malloc` / `write` / `read` / `free`, ownership transfer |
 | `concurrent.nema` | Multi-agent concurrency, mailbox `recv`, `spawn` |
+| `for_demo.nema` | `for` loops (range & list), emotion-gated iteration |
+| `result_demo.nema` | `Result<T>` error type, `ok(v)` / `err(msg)`, `match` |
+| `channel_demo.nema` | Typed `channel<T>`, `send` / `recv` / `close` across agents |
+| `contract_demo.nema` | Layer 9 contracts — NeuroState invariants |
 
 ---
 

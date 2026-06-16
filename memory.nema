@@ -1,0 +1,67 @@
+// Nema CPOS Memory Demo
+//
+// CPOS (Context Pointer OS) は2層の記憶モデル:
+//   - working memory: RAM (最大5件)
+//   - long-term storage: JSON (disk)
+//
+// gaba >= 0.7 になると自動的に working → long-term へスワップされる。
+// このファイルはその挙動を agent で表現する。
+
+agent Archivist {
+  mood: NeuroState = {
+    dp:   0.5,
+    s:    0.8,
+    ac:   0.7,
+    ox:   0.6,
+    gaba: 0.8,   // 高い gaba → 自動スワップが走る
+    e:    0.4
+  }
+
+  attractor rest {
+    s:    0.9,
+    gaba: 0.8,
+    dp:   0.2,
+    ac:   0.3,
+    ox:   0.5,
+    e:    0.4
+  }
+
+  // 記憶の書き込みには落ち着きが必要
+  @requires(s > 0.5 and gaba > 0.4)
+  fn store(key: i64, val: i64) -> void {
+    let k = key
+    let v = val
+  }
+
+  // 想起には集中力が必要
+  @requires(ac > 0.6)
+  fn retrieve(key: i64) -> i64 {
+    let k = key
+    return k
+  }
+
+  // 疲れると思い出せない
+  @requires(dp > 0.3 or s > 0.7)
+  fn summarize_day() -> void {
+    let summary = 1
+  }
+}
+
+agent Librarian {
+  mood: NeuroState = {
+    dp:   0.4,
+    s:    0.9,
+    ac:   0.5,
+    ox:   0.8,
+    gaba: 0.6,
+    e:    0.3
+  }
+
+  // 共感しながら記憶を受け取る
+  @requires(ox > 0.6)
+  fn receive_memory(data: i64) -> void {
+    recv mem from Archivist
+  }
+}
+
+Archivist ~~ Librarian 0.15

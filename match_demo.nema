@@ -1,0 +1,35 @@
+// match + import デモ
+
+import "lib/sensors.nema"
+
+agent Controller {
+  mood: NeuroState = {
+    dp: 0.75, s: 0.6, ac: 0.8, ox: 0.6, gaba: 0.5, e: 0.6
+  }
+
+  trust: { Sensor: 0.9 }
+
+  @requires(ac > 0.5)
+  fn regulate() -> void {
+    let level = query dp from Sensor
+
+    match level {
+      > 0.8 { emit high_energy 1 }
+      > 0.5 { emit normal 1 }
+      _     { emit low_energy 0 }
+    }
+  }
+}
+
+agent Dashboard {
+  mood: NeuroState = {
+    dp: 0.5, s: 0.8, ac: 0.6, ox: 0.7, gaba: 0.6, e: 0.4
+  }
+
+  on high_energy { let alert = value }
+  on normal      { let status = value }
+  on low_energy  { let warn = value }
+}
+
+Controller ~~ Dashboard 0.2
+Controller trust Sensor 0.9
