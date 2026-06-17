@@ -1,13 +1,12 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["flit_core>=3.2"]
+build-backend = "flit_core.buildapi"
 
 [project]
 name = "nema-lang"
 version = "0.4.0"
 description = "Experimental agent-oriented language for compiling NeuroState into control flow"
 readme = "README.md"
-license = {file = "LICENSE"}
 requires-python = ">=3.10"
 keywords = ["language", "compiler", "llvm", "ai", "emotion", "agent", "neurostate"]
 classifiers = [
@@ -31,18 +30,5 @@ Homepage = "https://github.com/kagioneko/nema-lang"
 Repository = "https://github.com/kagioneko/nema-lang"
 "Bug Tracker" = "https://github.com/kagioneko/nema-lang/issues"
 
-[tool.setuptools]
-include-package-data = true
-
-py-modules = [
-    "lexer",
-    "ast_nodes",
-    "parser",
-    "typechecker",
-    "evaluator",
-    "stdlib",
-    "compiler",
-    "jit_run",
-    "nema",
-    "shiichan",
-]
+[tool.flit.module]
+name = "nema"
