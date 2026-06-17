@@ -89,6 +89,7 @@ class TT(Enum):
     RPAREN = auto()     # )
     LANGLE = auto()     # <
     RANGLE = auto()     # >
+    QUESTION = auto()  # ?
     # その他
     NEWLINE = auto()
     EOF = auto()
@@ -333,6 +334,8 @@ class Lexer:
                 self.advance(); tokens.append(Token(TT.STAR, "*", line))
             elif ch == "/":
                 self.advance(); tokens.append(Token(TT.SLASH, "/", line))
+            elif ch == "?":
+                self.advance(); tokens.append(Token(TT.QUESTION, "?", line))
             else:
                 raise LexerError(f"line {line}: unexpected char {ch!r}")
 

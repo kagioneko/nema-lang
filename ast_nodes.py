@@ -106,6 +106,21 @@ class ListExpr:
     elems: list    # list[Expr]
 
 @dataclass
+class PropagateExpr:
+    """expr? — Result<T>をアンラップ。Errなら即return Err(...)"""
+    expr: object
+
+@dataclass
+class MethodCallExpr:
+    receiver: object  # Expr (VarRef or AgentConstructorExpr)
+    method: str
+    args: list
+
+@dataclass
+class AgentConstructorExpr:
+    agent_name: str   # "MathHelper()" → agent への参照を返す
+
+@dataclass
 class OkExpr:
     value: object  # Expr
 
@@ -150,7 +165,7 @@ class ExprStmt:
 
 @dataclass
 class BranchStmt:
-    condition: list
+    condition: object  # list (mood条件) or Expr (boolean式)
     then_body: list
     else_body: list
 

@@ -10,7 +10,7 @@ from typechecker import typecheck, report
 from compiler import compile_program
 
 DECAY_INTERVAL = 5.0
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 
 HELP_TEXT = """
 Nema Language Interpreter v0.1.0
@@ -125,15 +125,17 @@ def main():
         print(f"エラー: ファイルが見つかりません: {path}")
         sys.exit(1)
 
+    base_dir = os.path.dirname(os.path.abspath(path))
+
     if check_mode:
         tokens = Lexer(src).tokenize()
-        program = Parser(tokens).parse()
+        program = Parser(tokens, base_dir=base_dir).parse()
         has_errors = report(typecheck(program))
         sys.exit(1 if has_errors else 0)
 
     if compile_mode:
         tokens = Lexer(src).tokenize()
-        program = Parser(tokens).parse()
+        program = Parser(tokens, base_dir=base_dir).parse()
         has_errors = report(typecheck(program))
         if has_errors:
             sys.exit(1)
@@ -147,7 +149,7 @@ def main():
     if wasm_mode:
         from wasm_compiler import compile_to_wat
         tokens = Lexer(src).tokenize()
-        program = Parser(tokens, base_dir=os.path.dirname(os.path.abspath(path))).parse()
+        program = Parser(tokens, base_dir=base_dir).parse()
         has_errors = report(typecheck(program))
         if has_errors:
             sys.exit(1)
@@ -173,7 +175,7 @@ def main():
             print(f"   変換: wat2wasm {out_wat} -o {out_wat.replace('.wat', '.wasm')}")
         sys.exit(0)
 
-    ev = run(src, base_dir=os.path.dirname(os.path.abspath(path)))
+    ev = run(src, base_dir=base_dir)
 
     if live_mode:
         # ライブモード: 初期描画用の空行を確保

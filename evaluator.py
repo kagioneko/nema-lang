@@ -10,7 +10,12 @@ from ast_nodes import (Program, AgentDecl, NeuroStateNode,
                        LoopStmt, BreakStmt, WhenBlock, AttractorDecl, ForStmt,
                        Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr,
                        ChannelCreateExpr, RangeExpr, ListExpr, OkExpr, ErrExpr,
-                       SetMoodStmt)
+                       SetMoodStmt, MethodCallExpr, AgentConstructorExpr, PropagateExpr)
+
+class _PropagateError(Exception):
+    """? 演算子によるエラー早期リターン用シグナル"""
+    def __init__(self, err_val):
+        self.err_val = err_val
 
 TRUST_DEFAULT  = 0.5   # 未定義エージェントに対するデフォルト信頼度
 TRUST_GATE     = 0.3   # これを下回ると query/send がブロックされる
@@ -289,7 +294,8 @@ class Agent:
             self.attractors[a.name] = a.values
         self.active_attractor: str | None = None
 
-    def call(self, fn_name: str, args: list = None) -> str:
+    def call_value(self, fn_name: str, args: list = None):
+        """実際の返り値を返す内部呼び出し（式の中で使用）"""
         if fn_name not in self.fns:
             self.mood.apply(ERROR_EFFECTS)
             return f"[エラー] {fn_name} は未定義"
@@ -318,7 +324,11 @@ class Agent:
             for p, a in zip(fn.params, args):
                 pname = p.name if hasattr(p, "name") else str(p)
                 env[pname] = a
-        ret_val = self._exec_body(fn.body, env)
+        try:
+            ret_val = self._exec_body(fn.body, env)
+        except _PropagateError as e:
+            # ? 演算子によるエラー早期リターン
+            return e.err_val
 
         if fn_name in AFTER_EFFECTS:
             self.mood.apply(AFTER_EFFECTS[fn_name], self.mood_lock)
@@ -351,7 +361,15 @@ class Agent:
         self._check_invariants(f"call:{fn_name}")
 
         ret_str = f" → {ret_val}" if ret_val is not None else ""
-        return f"[実行OK] {fn_name}({', '.join(str(a) for a in (args or []))}){ret_str}"
+        print(f"[実行OK] {fn_name}({', '.join(str(a) for a in (args or []))}){ret_str}")
+        return ret_val
+
+    def call(self, fn_name: str, args: list = None) -> str:
+        """REPL向け: 実行して文字列サマリを返す（互換維持）"""
+        result = self.call_value(fn_name, args)
+        if isinstance(result, str) and result.startswith("["):
+            return result  # エラー文字列はそのまま
+        return f"[完了] {fn_name}"
 
     def _check_invariants(self, context: str = ""):
         """contract 不変条件を全てチェックし、違反があればログ + ペナルティ"""
@@ -483,7 +501,13 @@ class Agent:
             return val
 
         if isinstance(stmt, BranchStmt):
-            if self.mood.check(stmt.condition):
+            if isinstance(stmt.condition, list):
+                # 旧形式: mood条件リスト [[('dp','>',0.6),...],...]
+                cond_result = self.mood.check(stmt.condition)
+            else:
+                # 新形式: Expr (ローカル変数・算術式・比較式)
+                cond_result = bool(self._eval_expr(stmt.condition, env))
+            if cond_result:
                 result = self._exec_body(stmt.then_body, env)
             else:
                 result = self._exec_body(stmt.else_body, env)
@@ -641,8 +665,37 @@ class Agent:
                    "==": lambda a, b: a == b}
             return ops.get(expr.op, lambda a, b: None)(l, r)
 
+        if isinstance(expr, PropagateExpr):
+            val = self._eval_expr(expr.expr, env)
+            if isinstance(val, NemaOk):
+                return val.value
+            if isinstance(val, NemaErr):
+                raise _PropagateError(val)
+            return val  # Result でない値はそのまま通す
+
+        if isinstance(expr, AgentConstructorExpr):
+            # MathHelper() → エージェント参照を返す
+            if self._ev and expr.agent_name in self._ev.agents:
+                return ("__agent_ref__", expr.agent_name)
+            # 未定義の場合は自分のメソッドを試みる
+            return self.call_value(expr.agent_name, [])
+
+        if isinstance(expr, MethodCallExpr):
+            receiver = self._eval_expr(expr.receiver, env)
+            args = [self._eval_expr(a, env) for a in expr.args]
+            # h.method(args) — receiver がエージェント参照
+            if isinstance(receiver, tuple) and len(receiver) == 2 and receiver[0] == "__agent_ref__":
+                agent_name = receiver[1]
+                if self._ev and agent_name in self._ev.agents:
+                    return self._ev.agents[agent_name].call_value(expr.method, args)
+                return f"[エラー] agent {agent_name} が見つからない"
+            return f"[エラー] {receiver} はエージェント参照ではない"
+
         if isinstance(expr, FnCallExpr):
             args = [self._eval_expr(a, env) for a in expr.args]
+            # エージェント名 → エージェント参照を返す（コンストラクタ呼び出し）
+            if self._ev and expr.name in self._ev.agents and not args:
+                return ("__agent_ref__", expr.name)
             # インタープリタ組み込み関数（alloc/write/read/free）
             if expr.name in INTERP_BUILTINS:
                 # capability チェック
@@ -659,8 +712,7 @@ class Agent:
                           f"{expr.name!r} の権限がない")
                     return None
                 return INTERP_BUILTINS[expr.name](*args)
-            result = self.call(expr.name, args)
-            return result
+            return self.call_value(expr.name, args)
 
         if isinstance(expr, MsgSend):
             msg = self._eval_expr(expr.message, env)
@@ -936,12 +988,11 @@ class Evaluator:
         if agent_name not in self.agents:
             print(f"[エラー] agent {agent_name} が見つからない")
             return
-        result = self.agents[agent_name].call(fn_name, args)
+        self.agents[agent_name].call_value(fn_name, args)
         if "connect" in fn_name:
             for (a, b) in list(self.attractions.keys()):
                 if agent_name in (a, b):
                     self.attractions[(a, b)] = min(1.0, self.attractions[(a, b)] + 0.01)
-        print(result)
 
     def spawn(self, agent_name: str, fn_name: str, args: list = None) -> bool:
         """エージェントの関数をバックグラウンドスレッドで実行"""
@@ -954,7 +1005,7 @@ class Evaluator:
             print(f"[spawn ERROR] {agent_name}: スレッド上限 ({MAX_THREADS}) 到達")
             return False
         t = threading.Thread(
-            target=agent.call,
+            target=agent.call_value,
             args=(fn_name, args or []),
             daemon=True,
             name=f"{agent_name}.{fn_name}",

@@ -5,7 +5,7 @@ from ast_nodes import (
     WhenBlock, AttractorDecl, AttractionStmt, TrustDecl, CapabilityDecl, ContractDecl,
     TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel, TypeList, TypeResult,
     Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr, ChannelCreateExpr,
-    RangeExpr, ListExpr, OkExpr, ErrExpr,
+    RangeExpr, ListExpr, OkExpr, ErrExpr, MethodCallExpr, AgentConstructorExpr, PropagateExpr,
     LetStmt, OwnStmt, ReleaseStmt, RecvStmt, SpawnStmt,
     SendChStmt, RecvChStmt, CloseChStmt,
     EmitStmt, OnEventBlock, MatchArm, MatchStmt,
@@ -390,7 +390,7 @@ class Parser:
 
     def parse_branch(self) -> BranchStmt:
         self.expect(TT.BRANCH)
-        cond = self.parse_condition()
+        cond = self.parse_binop()  # Expr として評価（VarRef も mood フィールドも対応）
         self.expect(TT.LBRACE)
         then_body = self.parse_body()
         self.expect(TT.RBRACE)
@@ -437,12 +437,20 @@ class Parser:
         return self.parse_binop()
 
     def parse_binop(self) -> object:
-        left = self.parse_primary()
-        while self.peek().type in (TT.PLUS, TT.MINUS, TT.GT, TT.LT, TT.GE, TT.LE, TT.EQ):
+        left = self.parse_unary_postfix()
+        while self.peek().type in (TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH, TT.GT, TT.LT, TT.GE, TT.LE, TT.EQ):
             op = self.advance().value
             right = self.parse_primary()
             left = BinOp(left=left, op=op, right=right)
         return left
+
+    def parse_unary_postfix(self) -> object:
+        """primary の後に ? が来たら PropagateExpr に包む"""
+        expr = self.parse_primary()
+        if self.peek().type == TT.QUESTION:
+            self.advance()
+            return PropagateExpr(expr=expr)
+        return expr
 
     def parse_primary(self) -> object:
         t = self.peek()
@@ -465,8 +473,24 @@ class Parser:
                     args.append(self.parse_expr())
                     self.skip(TT.COMMA)
                 self.expect(TT.RPAREN)
-                return FnCallExpr(name=name, args=args)
-            return VarRef(name=name)
+                expr = AgentConstructorExpr(agent_name=name)
+            else:
+                expr = VarRef(name=name)
+            # ドット記法: expr.method(args) をチェーン処理
+            while self.peek().type == TT.DOT:
+                self.advance()  # consume '.'
+                method = self.expect(TT.IDENT).value
+                self.expect(TT.LPAREN)
+                margs = []
+                while self.peek().type != TT.RPAREN:
+                    margs.append(self.parse_expr())
+                    self.skip(TT.COMMA)
+                self.expect(TT.RPAREN)
+                expr = MethodCallExpr(receiver=expr, method=method, args=margs)
+            # AgentConstructorExpr でドット記法なし → 通常のFnCallExpr扱い
+            if isinstance(expr, AgentConstructorExpr):
+                return FnCallExpr(name=expr.agent_name, args=[])
+            return expr
 
         if t.type == TT.QUERY:
             return self.parse_query_expr()
