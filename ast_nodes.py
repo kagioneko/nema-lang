@@ -253,6 +253,7 @@ class FnDecl:
     body: list                  # list of statement nodes
     on_error_body: list = None  # @on_error { ... } があれば実行される
     ensures: list = None        # @ensures(dp > 0.5) — 事後条件
+    cpos_gate: bool = False     # @cpos_gate — NeuroState警告またはパターン異常で発動
 
 @dataclass
 class WhenBlock:

@@ -120,7 +120,7 @@ class Parser:
             t = self.peek()
             if t.type == TT.MOOD:
                 mood = self.parse_mood()
-            elif t.type in (TT.FN, TT.REQUIRES, TT.ENSURES, TT.AFTER, TT.ON_ERROR):
+            elif t.type in (TT.FN, TT.REQUIRES, TT.ENSURES, TT.AFTER, TT.ON_ERROR, TT.CPOS_GATE):
                 fns.append(self.parse_fn())
             elif t.type == TT.WHEN:
                 whens.append(self.parse_when_block())
@@ -167,6 +167,11 @@ class Parser:
         requires = None
         ensures = None
         on_error_body = None
+        cpos_gate = False
+
+        if self.peek().type == TT.CPOS_GATE:
+            self.advance()
+            cpos_gate = True
 
         if self.peek().type == TT.REQUIRES:
             self.advance()
@@ -217,7 +222,7 @@ class Parser:
 
         return FnDecl(name=name, params=params, ret_type=ret_type,
                       requires=requires, ensures=ensures, body=body,
-                      on_error_body=on_error_body)
+                      on_error_body=on_error_body, cpos_gate=cpos_gate)
 
     def parse_when_block(self) -> WhenBlock:
         self.expect(TT.WHEN)
@@ -464,6 +469,22 @@ class Parser:
             self.advance()
             return Literal(value=t.value)
 
+        # mood.origin() / mood.state() — mood はキーワードだが式内で使えるよう特別扱い
+        if t.type == TT.MOOD and self.tokens[self.pos + 1].type == TT.DOT:
+            self.advance()  # consume 'mood'
+            expr = VarRef(name="mood")
+            while self.peek().type == TT.DOT:
+                self.advance()
+                method = self.expect(TT.IDENT).value
+                self.expect(TT.LPAREN)
+                margs = []
+                while self.peek().type != TT.RPAREN:
+                    margs.append(self.parse_expr())
+                    self.skip(TT.COMMA)
+                self.expect(TT.RPAREN)
+                expr = MethodCallExpr(receiver=expr, method=method, args=margs)
+            return expr
+
         if t.type == TT.IDENT:
             name = self.advance().value
             if self.peek().type == TT.LPAREN:
@@ -489,7 +510,7 @@ class Parser:
                 expr = MethodCallExpr(receiver=expr, method=method, args=margs)
             # AgentConstructorExpr でドット記法なし → 通常のFnCallExpr扱い
             if isinstance(expr, AgentConstructorExpr):
-                return FnCallExpr(name=expr.agent_name, args=[])
+                return FnCallExpr(name=expr.agent_name, args=args if self.peek().type != TT.DOT else [])
             return expr
 
         if t.type == TT.QUERY:

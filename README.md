@@ -338,19 +338,49 @@ Exit code `0` = clean, `1` = errors found.
 Nema has six layers of execution safety. No single layer is sufficient — they compose.
 
 ```
-Layer 1: Emotion Gate       @requires(dp > 0.6)  → fcmp ogt in LLVM IR
-Layer 2: Post-condition     @ensures(gaba > 0.3) → verified after execution; runs @on_error on fail
-Layer 3: Fallback           @on_error { ... }    → runs on gate fail OR ensures fail
-Layer 4: Static Type Check  unknown fields / out-of-range values → compile-time error
-Layer 5: Ownership          own / release / recv — double-free raises serotonin penalty
-Layer 6: Capability         capability: { alloc, emit } — privileged ops (alloc/free) require declaration
-Layer 7: Trust Score        trust: { AgentB: 0.8 } — query/send blocked if trust < 0.3
-Layer 8: Memory Isolation   CPOS working memory (max 5) / long-term JSON / auto-swap
-Layer 9: Contract           contract { dp >= 0.1 } — invariant checked after every call/tick
+Layer 1:  Emotion Gate       @requires(dp > 0.6)  → fcmp ogt in LLVM IR
+Layer 2:  Post-condition     @ensures(gaba > 0.3) → verified after execution; runs @on_error on fail
+Layer 3:  Fallback           @on_error { ... }    → runs on gate fail OR ensures fail
+Layer 4:  Static Type Check  unknown fields / out-of-range values → compile-time error
+Layer 5:  Ownership          own / release / recv — double-free raises serotonin penalty
+Layer 6:  Capability         capability: { alloc, emit } — privileged ops (alloc/free) require declaration
+Layer 7:  Trust Score        trust: { AgentB: 0.8 } — query/send blocked if trust < 0.3
+Layer 8:  Memory Isolation   CPOS working memory (max 5) / long-term JSON / auto-swap
+Layer 9:  Contract           contract { dp >= 0.1 } — invariant checked after every call/tick
+Layer 10: CPOS Gate          @cpos_gate — blocks on NeuroState WARNING or suspicious call pattern
 ```
 
 **Emotion gates express agent readiness, not permissions.**
 Capabilities enforce permissions. Trust enforces identity. All three compose.
+
+### CPOS Gate (Layer 10)
+
+```nema
+agent SecureAgent {
+  mood: NeuroState = { dp: 0.5, s: 0.6, ac: 0.5, ox: 0.5, gaba: 0.3, e: 0.5 }
+
+  @cpos_gate
+  fn export_data() {
+    let src = mood.origin()   // trace what caused the current mood state
+    log(src)
+    emit "data exported"
+  }
+}
+```
+
+`@cpos_gate` triggers when **either** condition is met:
+- `gaba >= 0.6` — NeuroState WARNING level (accumulated context poisoning)
+- Alternating high/low impact call pattern detected over the last 6 calls (S6-class attack)
+
+`mood.origin()` returns the trace of what changed the mood state and from where:
+```
+[mood.origin]
+  ← user_input:hello: gaba+0.15, e+0.1
+  ← fn:do_work: s-0.1
+  ← user_input:suspicious: gaba+0.12, e+0.05
+```
+
+This closes the gap that scalar gates (C4) and trajectory gates (C5) both leave open.
 
 ```nema
 agent Kernel {

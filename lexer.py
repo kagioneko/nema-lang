@@ -54,6 +54,7 @@ class TT(Enum):
     ON_ERROR = auto()
     CTX = auto()
     CAPABILITY = auto()
+    CPOS_GATE = auto()
     # リテラル
     IDENT = auto()
     FLOAT = auto()
@@ -146,6 +147,7 @@ DECORATORS = {
     "after": TT.AFTER,
     "on_error": TT.ON_ERROR,
     "when": TT.WHEN,
+    "cpos_gate": TT.CPOS_GATE,
 }
 
 KEYWORDS["capability"] = TT.CAPABILITY

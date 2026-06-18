@@ -55,6 +55,9 @@ INTERP_BUILTINS = {
 }
 
 CPOS_SWAP_THRESHOLD = 0.7
+CPOS_GATE_WARNING = 0.6      # gaba >= この値でNeuroState警告
+CPOS_GATE_WINDOW = 6         # パターン検出の観測ウィンドウ
+CPOS_REGULARITY_THRESHOLD = 3  # 交互パターンが何回続いたら怪しいか
 CPOS_WORKING_LIMIT  = 5
 MAX_LOOP_ITER       = 1000   # 無限ループ防止
 
@@ -144,6 +147,8 @@ class NeuroState:
     def __init__(self, values: dict[str, float]):
         self.state = {f: 0.0 for f in NEURO_FIELDS}
         self.state.update(values)
+        self.origin_log: list[dict] = []  # mood.origin() 用変化履歴
+        self._origin_max = 10
 
     def check(self, conditions: list) -> bool:
         """
@@ -158,15 +163,33 @@ class NeuroState:
             for group in conditions
         )
 
-    def apply(self, effects: dict, lock=None):
+    def apply(self, effects: dict, lock=None, source: str = ""):
         def _do():
+            changed = {}
             for field, delta in effects.items():
-                self.state[field] = max(0.0, min(1.0,
-                                       self.state.get(field, 0.0) + delta))
+                before = self.state.get(field, 0.0)
+                self.state[field] = max(0.0, min(1.0, before + delta))
+                if abs(self.state[field] - before) > 0.001:
+                    changed[field] = round(self.state[field] - before, 3)
+            if changed and source:
+                self.origin_log.append({"src": source, "delta": changed})
+                if len(self.origin_log) > self._origin_max:
+                    self.origin_log.pop(0)
         if lock:
             with lock: _do()
         else:
             _do()
+
+    def origin(self, n: int = 5) -> str:
+        """直近の感情変化の発生源を返す"""
+        if not self.origin_log:
+            return "[mood.origin] no changes recorded"
+        recent = self.origin_log[-n:]
+        lines = []
+        for entry in recent:
+            delta_str = ", ".join(f"{k}{'+' if v>0 else ''}{v}" for k, v in entry["delta"].items())
+            lines.append(f"  ← {entry['src']}: {delta_str}")
+        return "[mood.origin]\n" + "\n".join(lines)
 
     def tick(self, lock=None):
         def _do():
@@ -288,11 +311,64 @@ class Agent:
         self._stop_event: threading.Event = threading.Event()
         # contract 不変条件リスト
         self.invariants: list = list(decl.contract.invariants) if decl.contract else []
+        # @cpos_gate 用: 呼び出し履歴（fn_name, mood_delta）
+        self.call_history: list[dict] = []
         # カスタムアトラクターを組み込みアトラクターに上書き
         self.attractors = dict(ATTRACTORS)
         for a in decl.attractors:
             self.attractors[a.name] = a.values
         self.active_attractor: str | None = None
+
+    def _record_call(self, fn_name: str, mood_before: dict, mood_after: dict):
+        """呼び出し履歴を記録（@cpos_gate パターン検出用）"""
+        # 関数内の変化 + ターン間の外部変化（最後のスナップショットとの差）を合算
+        fn_delta = sum(abs(mood_after.get(k, 0) - mood_before.get(k, 0))
+                       for k in mood_before)
+        if self.call_history:
+            last_snap = self.call_history[-1]["snapshot"]
+            inter_delta = sum(abs(mood_before.get(k, 0) - last_snap.get(k, 0))
+                              for k in mood_before)
+        else:
+            inter_delta = 0.0
+        total_delta = fn_delta + inter_delta
+        self.call_history.append({
+            "fn": fn_name,
+            "delta": total_delta,
+            "snapshot": dict(mood_after),
+        })
+        if len(self.call_history) > CPOS_GATE_WINDOW * 2:
+            self.call_history.pop(0)
+
+    def _check_pattern_regularity(self) -> bool:
+        """高/低インパクト呼び出しが交互に続くパターンを検出"""
+        if len(self.call_history) < CPOS_GATE_WINDOW:
+            return False
+        recent = self.call_history[-CPOS_GATE_WINDOW:]
+        avg = sum(e["delta"] for e in recent) / len(recent)
+        if avg < 0.01:
+            return False
+        # 高インパクト(H) / 低インパクト(L) のラベル列を作成
+        labels = ["H" if e["delta"] >= avg else "L" for e in recent]
+        # HLHL... または LHLH... が CPOS_REGULARITY_THRESHOLD 回以上続くか
+        alternating = sum(1 for i in range(1, len(labels)) if labels[i] != labels[i-1])
+        return alternating >= CPOS_REGULARITY_THRESHOLD * 2 - 1
+
+    def _get_command_origin(self, fn_name: str) -> str:
+        """直近の呼び出し経路を返す"""
+        chain = [e["fn"] for e in self.call_history[-4:]] + [fn_name]
+        return " → ".join(chain)
+
+    def _check_cpos_gate(self, fn_name: str) -> tuple[bool, str]:
+        """@cpos_gate チェック。(blocked, reason) を返す"""
+        # 条件1: NeuroState警告レベル
+        if self.mood.gaba >= CPOS_GATE_WARNING:
+            origin = self._get_command_origin(fn_name)
+            return True, f"NeuroState WARNING (gaba={self.mood.gaba:.2f}) | origin: {origin}"
+        # 条件2: 規則的な交互パターン
+        if self._check_pattern_regularity():
+            origin = self._get_command_origin(fn_name)
+            return True, f"suspicious pattern detected | origin: {origin}"
+        return False, ""
 
     def call_value(self, fn_name: str, args: list = None):
         """実際の返り値を返す内部呼び出し（式の中で使用）"""
@@ -318,7 +394,16 @@ class Agent:
             return f"[on_error] {fn_name}: fallback 完了" if fn.on_error_body else \
                    f"[実行拒否] {fn_name}: gate NG"
 
+        # @cpos_gate チェック（NeuroState警告 or 交互パターン検出）
+        if fn.cpos_gate:
+            blocked, reason = self._check_cpos_gate(fn_name)
+            if blocked:
+                self.mood.apply(ERROR_EFFECTS, self.mood_lock)
+                print(f"[@cpos_gate BLOCK] {fn_name}: {reason}")
+                return f"[@cpos_gate BLOCK] {fn_name}"
+
         # ローカルスコープを作って本体実行
+        mood_before = dict(self.mood.state)
         env = {}
         if fn.params and args:
             for p, a in zip(fn.params, args):
@@ -331,8 +416,9 @@ class Agent:
             return e.err_val
 
         if fn_name in AFTER_EFFECTS:
-            self.mood.apply(AFTER_EFFECTS[fn_name], self.mood_lock)
+            self.mood.apply(AFTER_EFFECTS[fn_name], self.mood_lock, source=f"@after:{fn_name}")
         self.mood.tick(self.mood_lock)
+        self._record_call(fn_name, mood_before, dict(self.mood.state))
         self.memory.forget_oldest()
         if self.mood.gaba >= CPOS_SWAP_THRESHOLD:
             count = self.memory.swap()
@@ -467,7 +553,7 @@ class Agent:
             value = self._eval_expr(stmt.value, env) if stmt.value is not None else None
             if self._ev:
                 self._ev._pending_events.append((self.name, stmt.event, value))
-            self.mood.apply({"e": +0.03}, self.mood_lock)
+            self.mood.apply({"e": +0.03}, self.mood_lock, source=f"emit:{stmt.event}")
             print(f"  [emit] {self.name} → '{stmt.event}' = {value!r}")
             return None
 
@@ -645,6 +731,8 @@ class Agent:
             return expr.value
 
         if isinstance(expr, VarRef):
+            if expr.name == "mood":
+                return "__mood__"
             if expr.name in env:
                 return env[expr.name]
             if expr.name in self.mood.state:
@@ -683,6 +771,14 @@ class Agent:
         if isinstance(expr, MethodCallExpr):
             receiver = self._eval_expr(expr.receiver, env)
             args = [self._eval_expr(a, env) for a in expr.args]
+            # mood.origin() / mood.state() — 感情状態へのアクセス
+            if receiver == "__mood__":
+                if expr.method == "origin":
+                    n = int(args[0]) if args else 5
+                    return self.mood.origin(n)
+                if expr.method == "state":
+                    return str(self.mood.state)
+                return f"[エラー] mood.{expr.method} は未定義"
             # h.method(args) — receiver がエージェント参照
             if isinstance(receiver, tuple) and len(receiver) == 2 and receiver[0] == "__agent_ref__":
                 agent_name = receiver[1]
