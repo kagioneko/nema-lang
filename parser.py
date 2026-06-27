@@ -3,8 +3,8 @@ import os
 from ast_nodes import (
     Program, AgentDecl, MoodDecl, NeuroStateNode, FnDecl, Param,
     WhenBlock, AttractorDecl, AttractionStmt, TrustDecl, CapabilityDecl, ContractDecl,
-    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel, TypeList, TypeResult,
-    Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr, ChannelCreateExpr,
+    TypeI64, TypeI32, TypeF64, TypeBool, TypeVoid, TypePtr, TypeNeuroState, TypeChannel, TypeList, TypeSet, TypeResult,
+    Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr, ChannelCreateExpr, SetCreateExpr,
     RangeExpr, ListExpr, OkExpr, ErrExpr, MethodCallExpr, AgentConstructorExpr, PropagateExpr,
     LetStmt, OwnStmt, ReleaseStmt, RecvStmt, SpawnStmt,
     SendChStmt, RecvChStmt, CloseChStmt,
@@ -523,6 +523,13 @@ class Parser:
             self.expect(TT.GT)
             return ChannelCreateExpr(elem_type=elem_type)
 
+        if t.type == TT.SET:
+            self.advance()  # consume 'set'
+            self.expect(TT.LT)
+            elem_type = self.parse_type()
+            self.expect(TT.GT)
+            return SetCreateExpr(elem_type=elem_type)
+
         if t.type == TT.LPAREN:
             self.advance()
             expr = self.parse_expr()
@@ -772,6 +779,12 @@ class Parser:
             elem = self.parse_type()
             self.expect(TT.GT)
             return TypeChannel(elem=elem)
+        if t.type == TT.SET:
+            self.advance()
+            self.expect(TT.LT)
+            elem = self.parse_type()
+            self.expect(TT.GT)
+            return TypeSet(elem=elem)
         if t.type == TT.IDENT and t.value == "Result":
             self.advance()
             self.expect(TT.LT)

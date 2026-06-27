@@ -9,7 +9,7 @@ from ast_nodes import (Program, AgentDecl, NeuroStateNode,
                        ReturnStmt, ExprStmt, BranchStmt,
                        LoopStmt, BreakStmt, WhenBlock, AttractorDecl, ForStmt,
                        Literal, VarRef, BinOp, FnCallExpr, MsgSend, QueryExpr,
-                       ChannelCreateExpr, RangeExpr, ListExpr, OkExpr, ErrExpr,
+                       ChannelCreateExpr, SetCreateExpr, RangeExpr, ListExpr, OkExpr, ErrExpr,
                        SetMoodStmt, MethodCallExpr, AgentConstructorExpr, PropagateExpr)
 
 class _PropagateError(Exception):
@@ -118,6 +118,32 @@ class NemaChannel:
         from ast_nodes import type_str
         et = type_str(self.elem_type) if self.elem_type else "?"
         return f"channel<{et}>"
+
+
+class NemaSet:
+    def __init__(self, elem_type=None):
+        self._data: set = set()
+        self.elem_type = elem_type
+
+    def add(self, value):
+        self._data.add(value)
+
+    def remove(self, value):
+        self._data.discard(value)
+
+    def contains(self, value) -> bool:
+        return value in self._data
+
+    def size(self) -> int:
+        return len(self._data)
+
+    def to_list(self) -> list:
+        return list(self._data)
+
+    def __repr__(self):
+        from ast_nodes import type_str
+        et = type_str(self.elem_type) if self.elem_type else "?"
+        return f"set<{et}>{{{', '.join(str(v) for v in sorted(self._data, key=str))}}}"
 
 
 class _ReturnSignal(Exception):
@@ -771,6 +797,21 @@ class Agent:
         if isinstance(expr, MethodCallExpr):
             receiver = self._eval_expr(expr.receiver, env)
             args = [self._eval_expr(a, env) for a in expr.args]
+            # NemaSet メソッド
+            if isinstance(receiver, NemaSet):
+                if expr.method == "add":
+                    receiver.add(args[0] if args else None)
+                    return None
+                if expr.method == "remove":
+                    receiver.remove(args[0] if args else None)
+                    return None
+                if expr.method == "contains":
+                    return receiver.contains(args[0] if args else None)
+                if expr.method == "size":
+                    return receiver.size()
+                if expr.method == "to_list":
+                    return receiver.to_list()
+                return f"[エラー] set.{expr.method} は未定義"
             # mood.origin() / mood.state() — 感情状態へのアクセス
             if receiver == "__mood__":
                 if expr.method == "origin":
@@ -822,6 +863,10 @@ class Agent:
             ch = NemaChannel(elem_type=expr.elem_type)
             print(f"  [channel] {self.name}: {ch} を作成")
             return ch
+
+        if isinstance(expr, SetCreateExpr):
+            s = NemaSet(elem_type=expr.elem_type)
+            return s
 
         if isinstance(expr, RangeExpr):
             start = int(self._eval_expr(expr.start, env))

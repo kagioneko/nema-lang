@@ -40,10 +40,14 @@ class TypeList:
     elem: object  # NemaType — list<i64> の i64 部分
 
 @dataclass
+class TypeSet:
+    elem: object  # NemaType — set<i64> の i64 部分
+
+@dataclass
 class TypeResult:
     ok: object  # NemaType — Result<T> の T
 
-NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState | TypeChannel | TypeList | TypeResult
+NemaType = TypeI64 | TypeI32 | TypeF64 | TypeBool | TypeVoid | TypePtr | TypeNeuroState | TypeChannel | TypeList | TypeSet | TypeResult
 
 
 def type_str(t) -> str:
@@ -56,6 +60,7 @@ def type_str(t) -> str:
     if isinstance(t, TypeNeuroState): return "NeuroState"
     if isinstance(t, TypeChannel): return f"channel<{type_str(t.elem)}>"
     if isinstance(t, TypeList): return f"list<{type_str(t.elem)}>"
+    if isinstance(t, TypeSet): return f"set<{type_str(t.elem)}>"
     if isinstance(t, TypeResult): return f"Result<{type_str(t.ok)}>"
     return "unknown"
 
@@ -94,6 +99,10 @@ class QueryExpr:
 
 @dataclass
 class ChannelCreateExpr:
+    elem_type: object  # NemaType
+
+@dataclass
+class SetCreateExpr:
     elem_type: object  # NemaType
 
 @dataclass

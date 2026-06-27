@@ -1,0 +1,28 @@
+// stdlib/collections — set/list ユーティリティ
+
+agent Collections {
+  mood: NeuroState = {
+    dp: 0.7, s: 0.8, ac: 0.9, ox: 0.4, gaba: 0.6, e: 0.3
+  }
+
+  // リストから重複を除去してset<i64>で返す (set版)
+  fn unique(items: list<i64>) -> void {
+    let seen = set<i64>
+    for x in items {
+      seen.add(x)
+    }
+    print("unique count:", seen.size())
+  }
+
+  // 2つのset<i64>の共通要素数を返す
+  fn intersection_size(a: set<i64>, b: set<i64>) -> i64 {
+    let count = 0
+    let al = a.to_list()
+    for x in al {
+      branch b.contains(x) {
+        let count = count + 1
+      } else {}
+    }
+    return count
+  }
+}

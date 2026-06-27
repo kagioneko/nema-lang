@@ -256,6 +256,39 @@ recv ch -> val { log(val) }
 close ch
 ```
 
+### set\<T\> Type (v0.6.0)
+```nema
+let tags = set<i64>
+tags.add(42)
+tags.add(42)          // duplicates silently ignored
+print(tags.size())    // 1
+print(tags.contains(42))  // True
+tags.remove(42)
+let items = tags.to_list()
+```
+Supported methods: `.add(v)`, `.remove(v)`, `.contains(v) -> bool`, `.size() -> i64`, `.to_list() -> list<T>`
+
+### Standard Library (v0.6.0)
+```nema
+import "lib/math.nema"
+import "lib/collections.nema"
+
+agent Main {
+  fn run() -> void {
+    let m = Math()
+    print(m.abs(0 - 5))         // 5
+    print(m.pow(2, 8))          // 256
+    print(m.clamp(15, 0, 10))   // 10
+
+    let c = Collections()
+    let nums = [1, 2, 3, 2, 1]
+    c.unique(nums)              // unique count: 4
+  }
+}
+```
+`lib/math.nema`: `abs`, `max`, `min`, `clamp`, `pow`  
+`lib/collections.nema`: `unique`, `intersection_size`
+
 ### Contracts (Layer 9)
 ```nema
 agent Counter {

@@ -1,0 +1,25 @@
+// stdlib/io — 入出力ユーティリティ
+
+agent IO {
+  mood: NeuroState = {
+    dp: 0.5, s: 0.8, ac: 0.9, ox: 0.4, gaba: 0.7, e: 0.3
+  }
+
+  // 区切り文字付きリストをフォーマットして出力
+  fn print_list(items: list<i64>) -> void {
+    let i = 0
+    for x in items {
+      print(x)
+    }
+  }
+
+  // n 個の "=" で区切り線を出力
+  fn print_hr() -> void {
+    print("================================")
+  }
+
+  // ラベル付きで値を出力
+  fn print_labeled(label: i64, value: i64) -> void {
+    print(label, ":", value)
+  }
+}

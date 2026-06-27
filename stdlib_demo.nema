@@ -1,0 +1,30 @@
+import "lib/math.nema"
+import "lib/collections.nema"
+
+agent Main {
+  mood: NeuroState = {
+    dp: 0.8, s: 0.7, ac: 0.8, ox: 0.5, gaba: 0.5, e: 0.5
+  }
+
+  fn run() -> void {
+    let m = Math()
+    print("abs(-5):", m.abs(0 - 5))
+    print("max(3, 7):", m.max(3, 7))
+    print("min(3, 7):", m.min(3, 7))
+    print("clamp(15, 0, 10):", m.clamp(15, 0, 10))
+    print("pow(2, 8):", m.pow(2, 8))
+
+    let c = Collections()
+    let nums = [1, 2, 3, 2, 1, 4]
+    c.unique(nums)
+
+    let s1 = set<i64>
+    s1.add(1)
+    s1.add(2)
+    s1.add(3)
+    let s2 = set<i64>
+    s2.add(3)
+    s2.add(4)
+    print("intersection size:", c.intersection_size(s1, s2))
+  }
+}

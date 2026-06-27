@@ -7,10 +7,13 @@ from lexer import Lexer
 from parser import Parser
 from evaluator import Evaluator, ATTRACTORS, NEURO_FIELDS
 from typechecker import typecheck, report
-from compiler import compile_program
+try:
+    from compiler import compile_program
+except ImportError:
+    compile_program = None
 
 DECAY_INTERVAL = 5.0
-VERSION = "0.4.0"
+VERSION = "0.6.0"
 
 HELP_TEXT = """
 Nema Language Interpreter v0.1.0
@@ -138,6 +141,9 @@ def main():
         program = Parser(tokens, base_dir=base_dir).parse()
         has_errors = report(typecheck(program))
         if has_errors:
+            sys.exit(1)
+        if compile_program is None:
+            print("Error: --compile requires llvmlite. pip install llvmlite")
             sys.exit(1)
         ir_code = compile_program(program)
         out_path = path.replace(".nema", ".ll")

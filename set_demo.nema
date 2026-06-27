@@ -1,0 +1,19 @@
+agent SetTest {
+  mood: NeuroState = { dp: 0.8, s: 0.5, ac: 0.7, ox: 0.6, gaba: 0.4, ep: 0.6 }
+
+  fn test_set() -> void {
+    let tags = set<i64>
+    tags.add(10)
+    tags.add(20)
+    tags.add(30)
+    tags.add(10)
+    print("size:", tags.size())
+    print("contains 20:", tags.contains(20))
+    print("contains 99:", tags.contains(99))
+    tags.remove(20)
+    print("after remove 20, size:", tags.size())
+    print("contains 20:", tags.contains(20))
+    let items = tags.to_list()
+    print("to_list:", items)
+  }
+}
